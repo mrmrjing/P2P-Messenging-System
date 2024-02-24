@@ -1,99 +1,99 @@
-// Implementation of the registry server
-// Contains the code for starting up the registry server, handling registration and deregistration requests from messaging nodes,
-// constructing the overlay network and managing the routing table
-
-/*
-CHECKLIST:
-- allows messaging nodes to register and deregister
-- prevents duplicate IDs and mismatched addresses
-- sends responses to registration and deregistration requests
-*/
-
 package main
 
 import (
+	"bufio"
 	"encoding/binary"
 	"fmt"
 	"group8/minichord"
 	"io"
 	"log"
-	"math/rand"
+	"math"
+	"math/rand" // For generating random numbers
 	"net"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
-	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/proto" // For Protocol Buffers, Google's data interchange format
 )
 
-// NodeInfo contains the information about a node in the network.
+// NodeInfo contains the information about a node in the network
 type NodeInfo struct {
-	ID   int
-	Addr string
+	ID           int        // Unique identifier for the node
+	Addr         string     // Network address of the node
+	Conn         net.Conn   // TCP connection to the node
+	RoutingTable []NodeInfo // Routing table for the node
 }
 
-const I64SIZE = 8 // Size of int64 in bytes
+// Constant representing the size of an int64 in bytes, used when encoding/decoding binary data
+const I64SIZE = 8
 
+// Registry is a data structure which holds the state of the server, including registered nodes and their information
 type Registry struct {
-	Nodes   map[int]NodeInfo
-	AddrMap map[string]bool
-	Mutex   sync.RWMutex
+	Nodes   map[int]NodeInfo // Map from node IDs to NodeInfo, representing all registered nodes
+	AddrMap map[string]bool  // Map from node addresses to a boolean, used to check for address uniqueness
+	Mutex   sync.RWMutex     // Mutex for safe concurrent access to the Registry's fields
 }
 
-// Starts the registry server by creating a new instance of a Registry, maps to keep track of the registered nodes and their addresses
+// This function creates a new instance of Registry with initialized fields, returns a pointer to the Registry type
 func NewRegistry() *Registry {
 	return &Registry{
-		Nodes:   make(map[int]NodeInfo),
-		AddrMap: make(map[string]bool),
+		Nodes:   make(map[int]NodeInfo), // Initialize the Nodes map
+		AddrMap: make(map[string]bool),  // Initialize the AddrMap
 	}
 }
 
-// Sets up the TCP server for the registry and listens for incoming connections
+// This function initializes the TCP server for the registry and listens for incoming connections on the specified port
 func (r *Registry) Start(port string) {
-	listener, err := net.Listen("tcp", ":"+port) // Listen on the specified port
+	listener, err := net.Listen("tcp", ":"+port) // Listen on all interfaces at the specified port
 	if err != nil {
 		fmt.Printf("Failed to start server: %s\n", err)
-		return
+		return // If server fails to start, exit the function
 	}
-	defer listener.Close()
 	fmt.Println("Registry listening on", listener.Addr().String())
+	defer listener.Close() // Ensure the listener is closed when the function exits using the defer keyword for cleanup
+
+	// Continuously accept new connections to ensure that the server is always available to clients, and handle each connection in a new goroutine
 	for {
-		conn, err := listener.Accept()
+		conn, err := listener.Accept() // Accept a new connection
 		if err != nil {
 			fmt.Printf("Failed to accept connection: %s\n", err)
-			continue
+			continue // If there's an error accepting the connection, skip to the next loop iteration to accept the next connection
 		}
-		go r.handleConnection(conn)
+		go r.handleConnection(conn) // Handle the connection concurrently in a new goroutine. This allows the server to handle multiple connections simultaneously
 	}
 }
 
-// Interprets the incoming message and calls the appropriate handler based on the message type
+// This function deals with incoming messages from a connection, directing them to the appropriate handlers
 func (r *Registry) handleConnection(conn net.Conn) {
-	defer conn.Close()
+	defer conn.Close() // Ensure the connection is closed when the function exits
 
-	// Receive and unmarshal the Protobuf message using the new function
+	// Receive and decode the incoming message from the connection
 	msg, err := ReceiveMiniChordMessage(conn)
 	if err != nil {
 		log.Printf("Error receiving MiniChord message: %v\n", err)
-		return // Exit if there was an error receiving the message
+		return // If there's an error, exit the function
 	}
 
-	// Process the message based on its type
-	switch msg := msg.Message.(type) {
+	// Handle the message based on its type
+	switch msg := msg.Message.(type) { // Initiate a type switch on the message type
 	case *minichord.MiniChord_Registration:
-		r.handleRegister(conn, msg.Registration)
+		r.handleRegister(conn, msg.Registration) // Handle registration messages
 	case *minichord.MiniChord_Deregistration:
-		r.handleDeregister(conn, msg.Deregistration)
-	// Add more cases as necessary for other message types
+		r.handleDeregister(conn, msg.Deregistration) // Handle deregistration messages
 	default:
-		log.Printf("Unknown message type received\n")
+		log.Printf("Unknown message type received\n") // Log if an unknown message type is received
 	}
 }
 
+// This function reads and decodes a MiniChord message from the specified connection
 func ReceiveMiniChordMessage(conn net.Conn) (message *minichord.MiniChord, err error) {
 	// First, get the number of bytes to received
-	bs := make([]byte, I64SIZE)
-	length, err := conn.Read(bs)
+	bs := make([]byte, I64SIZE)  // Create a buffer to hold the length of the incoming message
+	length, err := conn.Read(bs) // Read the length prefix from the connection
 	if err != nil {
 		if err != io.EOF {
 			log.Printf("ReceivedMiniChordMessage() read error: %s\n", err)
@@ -101,10 +101,10 @@ func ReceiveMiniChordMessage(conn net.Conn) (message *minichord.MiniChord, err e
 		return
 	}
 	if length != I64SIZE {
-		log.Printf("ReceivedMiniChordMessage() length error: %d\n", length)
-		return
+		log.Printf("ReceivedMiniChordMessage() length error: expected %d bytes, got %d\n", I64SIZE, length)
+		return // Return early if the length of the received data does not match the expected size
 	}
-	numBytes := uint64(binary.BigEndian.Uint64(bs))
+	numBytes := uint64(binary.BigEndian.Uint64(bs)) // Decode the length prefix
 
 	// Get the marshaled message from the connection
 	data := make([]byte, numBytes)
@@ -116,193 +116,418 @@ func ReceiveMiniChordMessage(conn net.Conn) (message *minichord.MiniChord, err e
 		return
 	}
 	if length != int(numBytes) {
-		log.Printf("ReceivedMiniChordMessage() length error: %d\n", length)
-		return
+		log.Printf("ReceivedMiniChordMessage() length error: expected %d bytes, got %d\n", numBytes, length)
+		return // Return early if the length of the received data does not match the expected size
 	}
 
-	// Unmarshal the message
+	// Unmarshal the binary data into a MiniChord message
 	message = &minichord.MiniChord{}
 	err = proto.Unmarshal(data[:length], message)
 	if err != nil {
-		log.Printf("ReceivedMiniChordMessage() unmarshal error: %s\n",
-			err)
-		return
+		log.Printf("ReceivedMiniChordMessage() unmarshal error: %s\n", err)
+		return // Return early on unmarshal error
 	}
+	// Log the received message for debugging purposes
 	log.Printf("ReceiveMiniChordMessage(): received %s (%v), %d from %s\n",
 		message, data[:length], length, conn.RemoteAddr().String())
-	return
+	return // Return the successfully unmarshaled message
 }
 
-// Manage the registration of a new messaging node with the registry
-func (r *Registry) handleRegister(conn net.Conn, registration *minichord.Registration) {
-	r.Mutex.Lock()
-	defer r.Mutex.Unlock()
-
-	fullAddr := registration.Address // Directly use the address from the Protobuf message
-
-	// Check if the address is already registered
-	if _, exists := r.AddrMap[fullAddr]; exists {
-		sendProtoResponse(conn, -3, "Node already registered", "registration")
-		return
-	}
-
-	// Create a unique new node ID randomly between 0 and 127
-	var nodeID int
-	for {
-		nodeID = rand.Intn(128) // Random node ID between 0 and 127
-		if _, exists := r.Nodes[nodeID]; !exists {
-			break
-		}
-	}
-
-	// Before adding the node to the registry, check if the connection's remote address matches the provided address
-	remoteAddr := conn.RemoteAddr().(*net.TCPAddr)
-	providedIP := strings.Split(fullAddr, ":")[0]
-
-	// Handle localhost cases
-	if providedIP == "localhost" {
-		providedIP = "127.0.0.1"
-	}
-	if remoteAddr.IP.String() == "::1" {
-		remoteAddr.IP = net.ParseIP("127.0.0.1")
-	}
-
-	// Allow loopback if the provided IP belongs to the local machine
-	if (remoteAddr.IP.String() == "::1" || remoteAddr.IP.String() == "127.0.0.1") && isLocalMachineIP(providedIP) {
-		log.Printf("Allowing registration from loopback since provided IP belongs to the local machine")
-	} else if remoteAddr.IP.String() != providedIP {
-		sendProtoResponse(conn, -4, "IP address mismatch between request and connection", "registration")
-		return
-	}
-
-	// Add the node to the registry
-	r.Nodes[nodeID] = NodeInfo{ID: nodeID, Addr: fullAddr}
-	r.AddrMap[fullAddr] = true
-
-	// Convert nodeID to int32 and send the node ID back to the node
-	sendProtoResponse(conn, int32(nodeID), "Registration successful", "registration")
-}
-
-// Checks if the provided IP is one of the local machine's IP addresses
-func isLocalMachineIP(ipAddr string) bool {
-	addrs, err := net.InterfaceAddrs()
+// This function encodes and sends a MiniChord message to the specified connection
+func SendMiniChordMessage(conn net.Conn, message *minichord.MiniChord) (err error) {
+	data, err := proto.Marshal(message) // Marshal the message into binary format
+	log.Printf("SendMiniChordMessage(): sending %s (%v), %d to %s\n",
+		message, data, len(data), conn.RemoteAddr().String())
 	if err != nil {
-		log.Printf("Error getting local IP addresses: %v", err)
-		return false
+		log.Panicln("Failed to marshal message:", err)
 	}
-	for _, addr := range addrs {
-		var ip net.IP
-		switch v := addr.(type) {
-		case *net.IPNet:
-			ip = v.IP
-		case *net.IPAddr:
-			ip = v.IP
-		}
-		if ip.String() == ipAddr {
-			return true
-		}
+	// First send the number of bytes in the marshaled message
+	bs := make([]byte, I64SIZE)                       // Create a buffer for the length prefix
+	binary.BigEndian.PutUint64(bs, uint64(len(data))) // Encode the length of the data
+	length, err := conn.Write(bs)                     // Send the length prefix
+	if err != nil {
+		log.Printf("SendMiniChordMessage() error sending length: %s\n", err)
 	}
-	return false
+	if length != I64SIZE {
+		log.Panicln("Short write?")
+	}
+	// Send the marshales message
+	length_, err := conn.Write(data)
+	if err != nil {
+		log.Printf("SendMiniChordMessage() error sending data: %s\n", err)
+	}
+	if length_ != len(data) {
+		log.Panicln("Short write?")
+	}
+	return // Successfully sent the message
 }
 
-// Manage the deregistration of a messaging node with the registry
-func (r *Registry) handleDeregister(conn net.Conn, deregistration *minichord.Deregistration) {
-	r.Mutex.Lock()
-	defer r.Mutex.Unlock()
+// This function manages the registration of new nodes within the registry
+func (r *Registry) handleRegister(conn net.Conn, registration *minichord.Registration) {
+	r.Mutex.Lock()         // Lock the registry for writing, to prevent concurrent write operations
+	defer r.Mutex.Unlock() // Unlock when the function exits
 
-	// Convert the node ID from the request to the proper integer format.
-	nodeID := int(deregistration.Id)
-	log.Printf("Deregistration attempt for Node ID: %d", nodeID)
+	fullAddr := registration.Address                                     // Extract the address from the registration message
+	log.Printf("Attempting to register node with address: %s", fullAddr) // Log the attempt to register
 
-	// Retrieve the registered node information using the node ID.
-	nodeInfo, ok := r.Nodes[nodeID]
-
-	// Validate node ID and address.
-	// Check if the node is actually registered and if the address matches.
-	if !ok {
-		log.Printf("Node ID %d not found for deregistration", nodeID)
-		sendProtoResponse(conn, int32(nodeID), "Node not registered", "deregistration")
-		return
-	}
-
-	// Check if the address from the deregistration request matches the registered address.
-	if nodeInfo.Addr != deregistration.Address {
-		log.Printf("Address mismatch for Node ID %d: registered address %s, deregistration address %s", nodeID, nodeInfo.Addr, deregistration.Address)
-		sendProtoResponse(conn, int32(nodeID), "Invalid node ID or address mismatch", "deregistration")
-		return
-	}
-
-	// Remove the node from registry records if validation passes.
-	delete(r.Nodes, nodeID)
-	delete(r.AddrMap, deregistration.Address) // Assuming AddrMap uses the same format as deregistration.Address.
-
-	// log.Printf("Node ID %d successfully deregistered", nodeID)
-	// Send a successful deregistration response.
-	sendProtoResponse(conn, int32(nodeID), "Deregistration successful", "deregistration")
-}
-
-// Function to send a response back to the client based on the type of message received
-func sendProtoResponse(conn net.Conn, result int32, info string, responseType string) {
-	var response *minichord.MiniChord
-
-	// Construct response based on the type
-	switch responseType {
-	case "registration":
-		// Construct a registration response
-		response = &minichord.MiniChord{
+	// Prevent duplicate registrations by checking if the address is already in use
+	if _, exists := r.AddrMap[fullAddr]; exists { // check if the value associated with the key fullAddr exists in the Addrmap
+		SendMiniChordMessage(conn, &minichord.MiniChord{
 			Message: &minichord.MiniChord_RegistrationResponse{
 				RegistrationResponse: &minichord.RegistrationResponse{
-					Result: result,
-					Info:   info,
+					Result: -3,
+					Info:   "Node already registered",
 				},
 			},
+		})
+		return // Exit the function to prevent further processing
+	}
+
+	// Generate a unique new node ID while ensuring that no duplicate IDs are assigned
+	var nodeID int
+	for {
+		nodeID = rand.Intn(128)                    // Generate a random node ID (0-127)
+		if _, exists := r.Nodes[nodeID]; !exists { // Check if the generated ID is already in use by searching through the Nodes map
+			break // Stop the loop if the generated ID is not in use, otherwise continue to generate a new ID
 		}
-	case "deregistration":
-		// Construct a deregistration response
-		response = &minichord.MiniChord{
-			Message: &minichord.MiniChord_DeregistrationResponse{
-				DeregistrationResponse: &minichord.DeregistrationResponse{
-					Result: result,
-					Info:   info,
+	}
+
+	// Verify that the connection's remote address matches the provided address, handling potential mismatches
+	remoteAddr := conn.RemoteAddr().(*net.TCPAddr) // Type assert the remote address to a TCP address
+	providedIP := strings.Split(fullAddr, ":")[0]  // Extract the IP part of the provided address, and leaving out the port number
+
+	// Log the remote and provided IP addresses for diagnostics
+	log.Printf("Provided IP: %s, Remote IP: %s", providedIP, remoteAddr.IP.String())
+
+	// Allow local connections regardless of the provided IP
+	if !remoteAddr.IP.IsLoopback() && remoteAddr.IP.String() != providedIP {
+		// Only reject if it's a non-local connection and the IPs don't match
+		SendMiniChordMessage(conn, &minichord.MiniChord{
+			Message: &minichord.MiniChord_RegistrationResponse{
+				RegistrationResponse: &minichord.RegistrationResponse{
+					Result: -4,
+					Info:   "IP address mismatch between request and connection",
 				},
 			},
-		}
-
-	default:
-		// Log an error or handle unexpected response types as necessary
-		log.Printf("sendProtoResponse() called with unknown response type: %s", responseType)
-		return // Exit the function as we don't want to proceed with an unknown response type
+		})
+		return // Exit if the IP addresses do not match
 	}
 
-	// Marshal the response into a protobuf message
-	data, err := proto.Marshal(response)
-	if err != nil {
-		log.Printf("Failed to marshal %s response: %s", responseType, err)
-		return
-	}
+	// Add the node to the registry after passing all checks
+	r.Nodes[nodeID] = NodeInfo{ID: nodeID, Addr: fullAddr, Conn: conn}
+	r.AddrMap[fullAddr] = true // Mark the address as registered
 
-	// Send the size of the marshaled message first
-	size := uint64(len(data)) // Store the length of the data to send for logging
-	if err := binary.Write(conn, binary.BigEndian, size); err != nil {
-		log.Printf("Error sending size of %s response (%d bytes): %s", responseType, size, err)
-		return
-	}
+	// Construct the success message including the current size of the registry
+	successMessage := fmt.Sprintf("Registration request successful. The number of messaging nodes currently constituting the overlay is (%d).", len(r.Nodes))
 
-	// Send the marshaled message
-	sentBytes, err := conn.Write(data)
-	if err != nil {
-		log.Printf("Error sending %s response message: %s", responseType, err)
-		return
-	}
-	log.Printf("Sent %s response message: %d bytes sent.", responseType, sentBytes)
+	// Upon successful registration, send a success messge back to client
+	SendMiniChordMessage(conn, &minichord.MiniChord{
+		Message: &minichord.MiniChord_RegistrationResponse{
+			RegistrationResponse: &minichord.RegistrationResponse{
+				Result: int32(nodeID),
+				Info:   successMessage,
+			},
+		},
+	})
 }
 
-func main() {
-	if len(os.Args) != 2 {
-		fmt.Println("Usage: go run registry.go registry-port")
-		return
+// This function manages the deregistration of nodes from the registry
+func (r *Registry) handleDeregister(conn net.Conn, deregistration *minichord.Deregistration) {
+	r.Mutex.Lock()         // Lock the registry for writing
+	defer r.Mutex.Unlock() // Ensure unlocking at the end of the function
+
+	nodeID := int(deregistration.Id) // Convert the node ID from the request to an integer
+
+	// Retrieve the registered node information using the provided ID and validate
+	nodeInfo, ok := r.Nodes[nodeID]
+	if !ok {
+		log.Printf("Node ID %d not found for deregistration", nodeID)
+		SendMiniChordMessage(conn, &minichord.MiniChord{
+			Message: &minichord.MiniChord_DeregistrationResponse{
+				DeregistrationResponse: &minichord.DeregistrationResponse{
+					Result: -1, // Use appropriate error code for "Node not registered"
+					Info:   "Node not registered",
+				},
+			},
+		})
+		return // Exit if the node ID is not found
 	}
 
-	registry := NewRegistry() // Create a single instance of the registry
-	registry.Start(os.Args[1])
+	// Verify that the address matches the registered information
+	if nodeInfo.Addr != deregistration.Address {
+		log.Printf("Address mismatch for Node ID %d: expected %s, got %s", nodeID, nodeInfo.Addr, deregistration.Address)
+		SendMiniChordMessage(conn, &minichord.MiniChord{
+			Message: &minichord.MiniChord_DeregistrationResponse{
+				DeregistrationResponse: &minichord.DeregistrationResponse{
+					Result: -2, // Use appropriate error code for "Invalid node ID or address mismatch"
+					Info:   "Invalid node ID or address mismatch",
+				},
+			},
+		})
+		return // Exit if the address does not match
+	}
+
+	// Remove the node from the registry after passing all validations
+	delete(r.Nodes, nodeID)
+	delete(r.AddrMap, deregistration.Address)
+
+	// Send a positive response to the node indicating successful deregistration
+	// TODO: Test if response is sent to client after deregistration
+	SendMiniChordMessage(conn, &minichord.MiniChord{
+		Message: &minichord.MiniChord_DeregistrationResponse{
+			DeregistrationResponse: &minichord.DeregistrationResponse{
+				Result: 0, // Use appropriate success code
+				Info:   "Deregistration successful",
+			},
+		},
+	})
+}
+
+// This function calculates and sets up routing tables for each node based on the overlay network's structure
+func (r *Registry) setupOverlay(nr int) {
+	// Default to 3 routing entries if not specified, where nr is the number of routing entries (table size)
+	if nr == 0 {
+		nr = 3
+	}
+
+	// Sort node IDs to facilitate table setup
+	// This is necessary to ensure that the routing tables are consistent across all nodes in determining which nodes are neighbors
+	nodeIDs := make([]int, 0, len(r.Nodes))
+	for id := range r.Nodes {
+		nodeIDs = append(nodeIDs, id)
+	}
+	sort.Ints(nodeIDs) // Sort the IDs for consistent ordering
+	log.Printf("Sorted Node IDs: %v", nodeIDs)
+
+	// Iterate through each node to calculate its routing table
+	// First entry is one hop away, second entry is two hops away, third entry is four hops away, and so on
+	for _, nodeID := range nodeIDs {
+		var routingTable []NodeInfo // Dynamically size the table to allow skipping self-references
+		// Loop through the number of routing entries to populate the routing table
+		for i := 0; i < nr; i++ {
+			hop := int(math.Pow(2, float64(i)))                              // Define a variable hop that represents the distance to the next node, where i is the index of the entry in the table
+			index := (sort.SearchInts(nodeIDs, nodeID) + hop) % len(nodeIDs) // Find the corresponding node index, wrapping around to the beginning if hop calculation exceeds the number of nodes
+			peerID := nodeIDs[index]                                         // Get the peer node's ID
+			// Check to avoid adding the same node to the routing table
+			if peerID != nodeID {
+				routingTable = append(routingTable, r.Nodes[peerID]) // Add the peer node's info to the routing table
+			}
+		}
+		log.Printf("Node %d routing table: %v", nodeID, routingTable)
+
+		// Update the node's routing table in the registry
+		nodeInfo := r.Nodes[nodeID]
+		nodeInfo.RoutingTable = routingTable
+		r.Nodes[nodeID] = nodeInfo // Update the node info in the registry
+
+		// Send the routing table to each node
+		r.sendNodeRegistry(nodeID, routingTable, nodeIDs)
+	}
+	log.Println("Completed setupOverlay")
+}
+
+// This function sends the routing table to the specified node
+func (r *Registry) sendNodeRegistry(nodeID int, routingTable []NodeInfo, allNodeIDs []int) {
+	log.Printf("Sending NodeRegistry to Node %d", nodeID)
+	// Construct the message with the routing table information
+	nodeRegistryMsg := &minichord.MiniChord{
+		Message: &minichord.MiniChord_NodeRegistry{
+			NodeRegistry: &minichord.NodeRegistry{
+				NR:    uint32(len(routingTable)),            // Number of routing entries
+				Peers: convertNodeInfoToProto(routingTable), // Convert NodeInfo to the corresponding protobuf structure
+				NoIds: uint32(len(allNodeIDs)),              // Total number of nodes
+				Ids:   convertIDsToInt32s(allNodeIDs),       // Convert node IDs to int32 slice
+			},
+		},
+	}
+
+	// Retrieve the connection for the specified node in order to establish a connection to it to send them their initial setup information
+	conn, err := r.getNodeConnectionByID(nodeID)
+	if err != nil {
+		log.Printf("Failed to get connection for node %d: %s", nodeID, err)
+		return // Exit if the connection could not be retrieved
+	}
+	defer conn.Close() // Ensure the connection is closed when the function exits
+
+	// Send the NodeRegistry message to the node, ensuring that each node receives its unique routing table and information about all other nodes
+	if err := SendMiniChordMessage(conn, nodeRegistryMsg); err != nil {
+		log.Printf("Failed to send NodeRegistry message to node %d: %s", nodeID, err)
+	} else {
+		log.Printf("Successfully sent NodeRegistry to Node %d", nodeID)
+	}
+}
+
+// This function converts a slice of NodeInfo into a slice of protobuf Deregistration messages
+func convertNodeInfoToProto(routingTable []NodeInfo) []*minichord.Deregistration {
+	peers := make([]*minichord.Deregistration, len(routingTable))
+	for i, nodeInfo := range routingTable {
+		peers[i] = &minichord.Deregistration{
+			Id:      int32(nodeInfo.ID),
+			Address: nodeInfo.Addr,
+		}
+	}
+	return peers
+}
+
+// This function converts a slice of int to a slice of int32
+func convertIDsToInt32s(ids []int) []int32 {
+	int32Ids := make([]int32, len(ids))
+	for i, id := range ids {
+		int32Ids[i] = int32(id) // Convert each int to int32
+	}
+	return int32Ids
+}
+
+// This function retrieves a TCP connection to a node identified by its ID
+func (r *Registry) getNodeConnectionByID(nodeID int) (net.Conn, error) {
+	log.Printf("Retrieving connection for Node %d", nodeID)
+	r.Mutex.RLock()         // Read-lock the registry to prevent concurrent reads and writes
+	defer r.Mutex.RUnlock() // Ensure unlocking at the end of the function
+
+	nodeInfo, exists := r.Nodes[nodeID]
+	if !exists {
+		log.Printf("No node found with ID %d", nodeID)
+		return nil, fmt.Errorf("no node with ID %d found", nodeID) // Return an error if the node does not exist
+	}
+
+	// Return the existing connection if available
+	if nodeInfo.Conn != nil {
+		return nodeInfo.Conn, nil
+	}
+
+	// Otherwise, establish a new connection to the node's address
+	conn, err := net.DialTimeout("tcp", nodeInfo.Addr, 5*time.Second)
+	if err != nil {
+		log.Printf("Failed to connect to Node %d at address %s: %s", nodeID, nodeInfo.Addr, err)
+		return nil, fmt.Errorf("failed to connect to node %d at %s: %w", nodeID, nodeInfo.Addr, err)
+	}
+	log.Printf("Connection established with Node %d", nodeID)
+	return conn, nil // Return the established connection
+}
+
+// This function prints all currently registered nodes
+func (r *Registry) ListNodes() {
+	r.Mutex.RLock()         // Read-lock the registry for safe reading
+	defer r.Mutex.RUnlock() // Ensure unlocking at the end of the function
+
+	fmt.Println("Listing all registered nodes:")
+	for id, info := range r.Nodes {
+		fmt.Printf("Node ID: %d, Address: %s\n", id, info.Addr) // Print each node's ID and address
+	}
+}
+
+// TODO: find out why setup (nr) is not working
+// This function sets up the overlay network with the specified number of routing entries per node (n)
+func (r *Registry) SetupOverlay(entries int) {
+	r.Mutex.Lock()         // Lock the registry for writing
+	defer r.Mutex.Unlock() // Ensure unlocking at the end of the function
+
+	fmt.Printf("Setting up overlay with %d entries per node...\n", entries)
+	r.setupOverlay(entries) // Setup the overlay network
+
+	fmt.Println("Overlay setup complete.") // Indicate that the setup is complete
+}
+
+// This function would list the computed routing tables for each node in the overlay
+func (r *Registry) ListRoutes() {
+	r.Mutex.RLock()         // Read-lock the registry for safe reading
+	defer r.Mutex.RUnlock() // Ensure unlocking at the end of the function
+
+	fmt.Println("Listing routing tables for all nodes:")
+	for id, node := range r.Nodes {
+		fmt.Printf("Routing table for Node ID: %d, Address: %s\n", id, node.Addr)
+		// check if the node has a routing table and print it
+		if len(node.RoutingTable) > 0 {
+			fmt.Println("  Routes to Node IDs:")
+			for _, routeID := range node.RoutingTable {
+				fmt.Printf("    %d\n", routeID.ID)
+			}
+		} else {
+			fmt.Println("  No routes available.")
+		}
+	}
+}
+
+// TODO: find out why start (n) is not working
+// This function initiates the messaging process, sending a specified number of messages to each node.
+func (r *Registry) StartMessaging(messageCount int) {
+	r.Mutex.RLock()         // Read-lock the registry for safe reading
+	defer r.Mutex.RUnlock() // Ensure unlocking at the end of the function
+
+	fmt.Printf("Initiating messaging with %d messages per node...\n", messageCount)
+
+	for _, nodeInfo := range r.Nodes {
+		msg := &minichord.MiniChord{
+			Message: &minichord.MiniChord_InitiateTask{
+				InitiateTask: &minichord.InitiateTask{
+					Packets: uint32(messageCount), // Set the number of messages to be sent
+				},
+			},
+		}
+		if err := SendMiniChordMessage(nodeInfo.Conn, msg); err != nil {
+			log.Printf("Error initiating messaging for Node ID %d: %s\n", nodeInfo.ID, err)
+		}
+	}
+}
+
+// main is the entry point of the program
+func main() {
+	// Check for the correct number of command-line arguments
+	if len(os.Args) != 2 {
+		fmt.Println("Usage: go run registry.go <registry-port>") // Print usage if incorrect arguments
+		return // Exit the program
+	}
+
+	registry := NewRegistry()     // Create a new registry instance
+	go registry.Start(os.Args[1]) // Start the registry server in a new goroutine
+
+	// Command-line interface loop
+	reader := bufio.NewReader(os.Stdin) // Create a new reader for reading commands from stdin
+	fmt.Println("Registry command interface started. Enter commands:")
+	for {
+		fmt.Print("> ") // Print a prompt
+		cmd, err := reader.ReadString('\n') // Read a command from stdin
+		if err != nil {
+			fmt.Println("Error reading command:", err)
+			continue // Skip to the next iteration on error
+		}
+		cmd = strings.TrimSpace(cmd) // Trim whitespace from the command
+
+		// Handle commands
+		switch {
+		case cmd == "list":
+			registry.ListNodes() // List all registered nodes
+		case strings.HasPrefix(cmd, "setup "):
+			parts := strings.Split(cmd, " ") // Split the command into parts
+			if len(parts) == 2 {
+				n, err := strconv.Atoi(parts[1]) // Parse the number of entries for the setup command
+				if err != nil {
+					fmt.Println("Invalid number for setup command:", err)
+				} else {
+					registry.SetupOverlay(n) // Setup the overlay with the specified number of entries
+				}
+			} else {
+				fmt.Println("Invalid setup command usage. Use 'setup <number>'.")
+			}
+		case cmd == "route":
+			registry.ListRoutes() // List routing tables for all nodes
+		case strings.HasPrefix(cmd, "start "):
+			parts := strings.Split(cmd, " ") // Split the command into parts
+			if len(parts) == 2 {
+				n, err := strconv.Atoi(parts[1]) // Parse the number of messages for the start command
+				if err != nil {
+					fmt.Println("Invalid number for start command:", err)
+				} else {
+					registry.StartMessaging(n) // Start the messaging process with the specified number of messages
+				}
+			} else {
+				fmt.Println("Invalid start command usage. Use 'start <number>'.")
+			}
+		case cmd == "exit":
+			fmt.Println("Exiting registry.") // Exit command
+			return                           // Exit the program
+		default:
+			fmt.Printf("Command not understood: %s\n", cmd) // Print an error for unrecognized commands
+		}
+	}
 }
