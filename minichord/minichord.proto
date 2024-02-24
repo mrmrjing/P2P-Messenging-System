@@ -1,0 +1,83 @@
+// protoc --proto_path=. --go_out=. --go_opt=paths=source_relative minichord.proto
+syntax = "proto3";
+package minichord;
+
+option go_package = "github.com/mkyas/cadp/minichord";
+
+message Registration {
+    string Address = 1; // Address of the peer that registers, must be acceptable by func Dial
+}
+
+message RegistrationResponse {
+    sfixed32 Result = 2;
+    string Info = 3;
+}
+
+message Deregistration {
+    sfixed32 Id = 2;
+    string Address = 1;
+}
+
+message DeregistrationResponse {
+    sfixed32 Result = 2;
+    string Info = 3;
+}
+
+
+message NodeRegistry {
+	fixed32 NR = 4;
+	repeated Deregistration Peers = 5; // Pair of Id and Address
+	fixed32 NoIds = 7;
+	repeated sfixed32 Ids = 6;
+}
+
+message NodeRegistryResponse {
+    fixed32 Result = 2;
+    string Info = 3;
+}
+
+message InitiateTask {
+	fixed32 Packets = 13;
+}
+
+message NodeData {
+	sfixed32 Destination = 1;
+	sfixed32 Source = 2;
+	sfixed32 Payload = 3;
+	fixed32 Hops = 4;
+	repeated sfixed32 Trace = 5;
+}
+
+message TaskFinished {
+    sfixed32 Id = 2;
+    string Address = 1;
+}
+	
+message RequestTrafficSummary {
+
+}
+
+message TrafficSummary {
+	sfixed32 Id = 2;
+	fixed32 Sent = 11;
+	fixed32 Relayed = 12;
+	fixed32 Received = 13;
+	sfixed64 TotalSent = 14;
+	sfixed64 TotalReceived = 15;
+}
+
+message MiniChord {
+	oneof Message {
+		Registration registration  = 17;
+		RegistrationResponse registrationResponse = 18;
+		Deregistration deregistration = 19;
+		DeregistrationResponse deregistrationResponse = 20;
+		NodeRegistry nodeRegistry = 21;
+		NodeRegistryResponse nodeRegistryResponse = 22;
+		InitiateTask initiateTask = 23;
+		NodeData nodeData = 15;
+		TaskFinished taskFinished = 24;
+		RequestTrafficSummary requestTrafficSummary = 25;
+		TrafficSummary reportTrafficSummary = 26;
+	}
+}
