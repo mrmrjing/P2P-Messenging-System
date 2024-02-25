@@ -448,7 +448,7 @@ func (r *Registry) ListRoutes() {
 	}
 }
 
-// TODO: find out why start (n) is not working
+// TODO: find out why start (n) is not working (2.5)
 // This function initiates the messaging process, sending a specified number of messages to each node.
 func (r *Registry) StartMessaging(messageCount int) {
 	r.Mutex.RLock()         // Read-lock the registry for safe reading

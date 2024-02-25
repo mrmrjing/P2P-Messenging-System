@@ -20,8 +20,8 @@ func main() {
 	deregMsg := &minichord.MiniChord{
 		Message: &minichord.MiniChord_Deregistration{
 			Deregistration: &minichord.Deregistration{
-				Id:      76,
-				Address: "130.208.29.127:58806",
+				Id:      73,
+				Address: "130.208.29.127:50507",
 			},
 		},
 	}
