@@ -19,16 +19,17 @@ import (
 
 // Define global variables
 var (
-	messagesSent     int                                           // Counter for the number of messages sent
-	messagesRelayed  int                                           // Counter for the number of messages relayed to other nodes
-	messagesReceived int                                           // Counter for the number of messages received
-	sumSent          int64                                         // Sum of values of all sent messages (assuming message values are integers)
-	sumReceived      int64                                         // Sum of values of all received messages
-	myNodeID         int                                           // Global variable to store the node ID assigned by the registry
-	routingTable     = RoutingTable{Entries: make(map[int]string)} // Routing table for forwarding messages
-	mutex            sync.Mutex                                    // Mutex to ensure thread-safe access to global variables
-	registryHostPort string                                        // Address of the registry server
-	localAddr        string                                        // Local address of this node
+	messagesSent     int                                           = 0     // Counter for the number of messages sent
+	messagesRelayed  int                                           = 0     // Counter for the number of messages relayed to other nodes
+	messagesReceived int                                           = 0     // Counter for the number of messages received
+	sumSent          int64                                         = 0     // Sum of values of all sent messages (assuming message values are integers)
+	sumReceived      int64                                         = 0     // Sum of values of all received messages
+	myNodeID         int                                                   // Global variable to store the node ID assigned by the registry
+	routingTable     = RoutingTable{Entries: make(map[int]string)}         // Routing table for forwarding messages
+	mutex            sync.Mutex                                            // Mutex to ensure thread-safe access to global variables
+	registryHostPort string                                                // Address of the registry server
+	localAddr        string                                                // Local address of this node
+	isReadyToStart   bool                                          = false // Flag to indicate if the node is ready to start
 )
 
 const I64SIZE = 8 // Constant representing the size of an int64 in bytes, used for encoding/decoding
@@ -114,7 +115,7 @@ func registerWithRegistry(registryAddress string, serverAddress string) {
 	}
 }
 
-// This function sends a deregistration message to the registry server
+// This function sends a deregistration message to the registry server and handles deregistration of a node
 func deregisterFromRegistry(registryAddress string, nodeID int, serverAddress string) {
 	conn, err := net.Dial("tcp", registryAddress) // Establish a connection to the registry for deregistration
 	if err != nil {
@@ -137,14 +138,36 @@ func deregisterFromRegistry(registryAddress string, nodeID int, serverAddress st
 		return
 	}
 
-	fmt.Println("Deregistered from registry with Node ID:", nodeID)
+	// Wait for a response from the registry
+	response, err := ReceiveMiniChordMessage(conn)
+	if err != nil {
+		log.Println("Error receiving response from registry:", err)
+		return
+	}
+
+	// If the response is a DeregistrationResponse
+	switch resp := response.Message.(type) {
+	case *minichord.MiniChord_DeregistrationResponse:
+		// Handle the response based on the result and info in the message
+		switch resp.DeregistrationResponse.Result {
+		case 0: // Success
+			fmt.Println("Successfully deregistered from registry with Node ID:", nodeID)
+			os.Exit(0) // Exit the program after successful deregistration
+		case -1: // Node not registered
+			fmt.Println("Deregistration failed: Node not registered.")
+		case -2: // Invalid node ID or address mismatch
+			fmt.Println("Deregistration failed: Invalid node ID or address mismatch.")
+		default:
+			fmt.Printf("Deregistration failed with unknown error code: %d\n", resp.DeregistrationResponse.Result)
+		}
+	default:
+		log.Println("Received unknown response type from registry")
+	}
 }
 
 // This function encodes and sends a MiniChord message to the specified connection
 func SendMiniChordMessage(conn net.Conn, message *minichord.MiniChord) (err error) {
 	data, err := proto.Marshal(message) // Marshal the message into binary format
-	log.Printf("SendMiniChordMessage(): sending %s (%v), %d to %s\n",
-		message, data, len(data), conn.RemoteAddr().String())
 	if err != nil {
 		log.Panicln("Failed to marshal message:", err)
 	}
@@ -207,9 +230,6 @@ func ReceiveMiniChordMessage(conn net.Conn) (message *minichord.MiniChord, err e
 		log.Printf("ReceivedMiniChordMessage() unmarshal error: %s\n", err)
 		return // Return early on unmarshal error
 	}
-	// Log the received message for debugging purposes
-	log.Printf("ReceiveMiniChordMessage(): received %s (%v), %d from %s\n",
-		message, data[:length], length, conn.RemoteAddr().String())
 	return // Return the successfully unmarshaled message
 }
 
@@ -235,17 +255,32 @@ func handleConnection(conn net.Conn) {
 		handleNodeRegistry(msg.NodeRegistry)
 
 	case *minichord.MiniChord_NodeData: // If the message is a NodeData message received from another node
-		// Process or forward the NodeData message
+		// Update the sum of received messages and increment the counter for received messages
+		mutex.Lock() // Acquire the mutex to safely update the global counters
+		messagesReceived++
+		sumReceived += int64(msg.NodeData.Payload)
+		mutex.Unlock() // Release the mutex
 		processNodeDataMessage(msg.NodeData)
 
-	case *minichord.MiniChord_RequestTrafficSummary:
+	case *minichord.MiniChord_RequestTrafficSummary: // If the message is a request for the traffic summary
 		// Send the traffic summary to the registry
 		sendTrafficSummary(conn)
 
 	case *minichord.MiniChord_InitiateTask:
-		// Initiate the task of sending messages to other nodes
-		go handleInitiateTask(int(msg.InitiateTask.Packets))
+		if isReadyToStart {
+			// Initiate the task of sending messages to other nodes
+			go handleInitiateTask(int(msg.InitiateTask.Packets))
+		} else {
+			fmt.Println("Node is not ready to start the task")
+		}
 
+	case *minichord.MiniChord_NodeRegistryResponse:
+		if msg.NodeRegistryResponse.Info == "All nodes ready" { // Use a unique string to indicate readiness
+			isReadyToStart = true
+			fmt.Println("Node is now ready to initiate tasks.")
+		} else {
+			fmt.Printf("Received NodeRegistryResponse: %s\n", msg.NodeRegistryResponse.Info)
+		}
 
 	default:
 		fmt.Printf("Received an unknown type of message: %T\n", msg) // Log unexpected message types.
@@ -260,7 +295,7 @@ func calculateDistance(source, destination int) int {
 	return distance
 }
 
-// This function processes a NodeRegistry message, and initiate connections to the nodes that comprise its routing table, and report back to the registry
+// (2.4) This function processes a NodeRegistry message, and initiate connections to the nodes that comprise its routing table, and report back to the registry
 func handleNodeRegistry(msg *minichord.NodeRegistry) {
 	mutex.Lock()                       // Acquire the mutex to safely update the routing table
 	newEntries := make(map[int]string) // Create a new map for the updated routing table entries.
@@ -300,24 +335,28 @@ func initiateConnection(address string) error {
 	return nil         // return nil if connection was successful
 }
 
-// This function reports the status of the connections to the registry
-func reportConnectionsStatus(successfulConnections, failedConnections []int) {
-	// Construct the NodeRegistryResponse message
+// (2.4, 4) This function reports the status of the connections to the registry, and report if all nodes have successfully established connections to nodes in their routing table
+func reportConnectionsStatus(_, failedConnections []int) {
 	var info string
-	if len(failedConnections) > 0 {
-		info = fmt.Sprintf("Failed to connect to nodes: %v", failedConnections)
+	var result uint32              // To indicate success or failure
+	const failureCode = 4294967294 // Maximum value of uint32 to indicate failure, as nodeId ranges from 0 to 127
+	if len(failedConnections) == 0 {
+		info = "Successfully connected to all nodes in the routing table."
+		result = uint32(myNodeID) // Use your node's ID as the result if successful
 	} else {
-		info = "Successfully connected to all nodes"
+		info = fmt.Sprintf("Failed to connect to nodes with IDs: %v", failedConnections)
+		result = failureCode // Use the maximum uint32 value to indicate failure
 	}
+	// Construct the NodeRegistryResponse message
 	response := &minichord.MiniChord{
 		Message: &minichord.MiniChord_NodeRegistryResponse{
 			NodeRegistryResponse: &minichord.NodeRegistryResponse{
-				Result: uint32(myNodeID), // Use your node's ID as the result if successful
-				Info:   info,
+				Result: result, // Use your node's ID as the result if successful, this field can't be negative as it is an uint32
+				Info:   info,   // A string that describes the error or provides additional information
 			},
 		},
 	}
-	// Send the response back to the registry
+	// Send the NodeRegistry response back to the registry
 	conn, err := net.Dial("tcp", registryHostPort)
 	if err != nil {
 		log.Println("Error connecting to registry:", err)
@@ -369,102 +408,109 @@ func forwardMessage(nodeData *minichord.NodeData, nextHop string) {
 
 // This function process and forwards the given message to the next hop according to the routing table
 func processNodeDataMessage(nodeData *minichord.NodeData) {
-    if int(nodeData.Destination) == myNodeID { // If the message is for this node
-        // The message has reached its destination.
-        fmt.Println("Message received at the destination node.")
-        mutex.Lock() // Safely update message counters
-        messagesReceived++
-        mutex.Unlock()
-    } else {
-        // Determine the directionality and check for overshooting the sink
-        var nextHop string
-        destinationDistance := calculateDistance(myNodeID, int(nodeData.Destination))
-        closestNextHop := -1
-        closestDistance := destinationDistance
+	if int(nodeData.Destination) == myNodeID { // If the message is for this node
+		// The message has reached its destination.
+		fmt.Println("Message received at the destination node.")
+		mutex.Lock() // Safely update message counters
+		messagesReceived++
+		mutex.Unlock()
+	} else {
+		// Determine the directionality and check for overshooting the sink
+		var nextHop string
+		destinationDistance := calculateDistance(myNodeID, int(nodeData.Destination))
+		closestNextHop := -1
+		closestDistance := destinationDistance
 
-        // Iterate through the routing table to find the closest next hop towards the destination
-        for id, address := range routingTable.Entries {
-            nextHopDistance := calculateDistance(id, int(nodeData.Destination))
-            if nextHopDistance < closestDistance { // Check if the next hop is closer to the destination
-                closestNextHop = id               // Update the closestNextHop with the ID of the closest next hop
-                closestDistance = nextHopDistance // Update the closestDistance with the distance to the closest next hop
-                nextHop = address                 // Update the nextHop with the address of the closest next hop
-            }
-        }
+		// Iterate through the routing table to find the closest next hop towards the destination
+		for id, address := range routingTable.Entries {
+			nextHopDistance := calculateDistance(id, int(nodeData.Destination))
+			if nextHopDistance < closestDistance { // Check if the next hop is closer to the destination
+				closestNextHop = id               // Update the closestNextHop with the ID of the closest next hop
+				closestDistance = nextHopDistance // Update the closestDistance with the distance to the closest next hop
+				nextHop = address                 // Update the nextHop with the address of the closest next hop
+			}
+		}
 
-        // Check if we found a valid next hop that does not overshoot the destination
-        if closestNextHop != -1 {
-            fmt.Printf("Forwarding message to closest next hop: %s\n", nextHop)
-            forwardMessage(nodeData, nextHop)
-        } else {
-            fmt.Println("No appropriate next hop found in routing table; dropping message.")
-        }
-    }
+		// Check if we found a valid next hop that does not overshoot the destination
+		if closestNextHop != -1 {
+			fmt.Printf("Forwarding message to closest next hop: %s\n", nextHop)
+			forwardMessage(nodeData, nextHop)
+		} else {
+			fmt.Println("No appropriate next hop found in routing table; dropping message.")
+		}
+	}
 }
 
 // This function is called when an InitiateTask message is received
 func handleInitiateTask(packets int) {
-    for i := 0; i < packets; i++ {
-        // Randomly select a destination node (excluding self)
-        destNodeID := chooseRandomNode()
-        if destNodeID == -1 {
-            log.Println("No valid destination node found")
-            continue
-        }
+	for i := 0; i < packets; i++ {
+		// Randomly select a destination node (excluding self)
+		destNodeID := chooseRandomNode()
+		if destNodeID == -1 {
+			log.Println("No valid destination node found")
+			continue
+		}
 
-        // Construct and send a data packet to the chosen node
-        sendDataPacket(destNodeID)
+		// Construct and send a data packet to the chosen node
+		sendDataPacket(destNodeID)
 
-        // Implement throttling to avoid overwhelming network
-        time.Sleep(time.Millisecond * 10) // wait 10ms between messages
-    }
+		// Implement throttling to avoid overwhelming network
+		time.Sleep(time.Millisecond * 10) // wait 10ms between messages
+	}
 
-    // After all messages have been sent, inform the registry of task completion
-    sendTaskFinishedMessage()
+	// TODO: Check if sendTaskFinishedMessage should be called here, and not
+	// After all messages have been sent, inform the registry of task completion
+	sendTaskFinishedMessage()
 }
 
-// This function randomly selects a node from the routing table, excluding the current node 
+// This function randomly selects a node from the routing table, excluding the current node
 func chooseRandomNode() int {
-    mutex.Lock() // Ensure thread-safe access to the routing table
-    defer mutex.Unlock()
+	mutex.Lock() // Ensure thread-safe access to the routing table
+	defer mutex.Unlock()
 
-    nodeIDs := make([]int, 0, len(routingTable.Entries))
-    for id := range routingTable.Entries {
-        if id != myNodeID { // Exclude the current node
-            nodeIDs = append(nodeIDs, id)
-        }
-    }
+	nodeIDs := make([]int, 0, len(routingTable.Entries))
+	for id := range routingTable.Entries {
+		if id != myNodeID { // Exclude the current node
+			nodeIDs = append(nodeIDs, id)
+		}
+	}
 
-    if len(nodeIDs) == 0 {
-        return -1 // No valid nodes found
-    }
+	if len(nodeIDs) == 0 {
+		return -1 // No valid nodes found
+	}
 
-    // Select a random node ID from the list
-    randIndex := rand.Intn(len(nodeIDs))
-    return nodeIDs[randIndex]
+	// Select a random node ID from the list
+	randIndex := rand.Intn(len(nodeIDs))
+	return nodeIDs[randIndex]
 }
 
 // This function sends a data packet to the specified destination node
 func sendDataPacket(destNodeID int) {
-    // Construct a NodeData message with a random payload
-    nodeData := &minichord.NodeData{
-        Destination: int32(destNodeID),
-        Source:      int32(myNodeID),
-        Payload: int32(rand.Int63n(4294967296) - 2147483648), // Random integer between -2147483648 and 2147483647
-        Hops:        0,
-        Trace:       []int32{}, // Initially empty trace
-    }
+	// Construct a NodeData message with a random payload
+	nodeData := &minichord.NodeData{
+		Destination: int32(destNodeID),
+		Source:      int32(myNodeID),
+		Payload:     int32(rand.Int63n(4294967296) - 2147483648), // Random integer between -2147483648 and 2147483647
+		Hops:        0,
+		Trace:       []int32{}, // Initially empty trace
+	}
 
-    // Find the next hop to the destination
-    nextHop, exists := routingTable.Entries[destNodeID]
-    if !exists {
-        log.Printf("No next hop found for destination node %d\n", destNodeID)
-        return
-    }
+	mutex.Lock()                       // Acquire the lock to update the global counters safely
+	messagesSent++                     // Increment the counter for sent messages
+	sumSent += int64(nodeData.Payload) // Add the payload to the sum of sent messages
+	mutex.Unlock()                     // Release the lock
 
-    // Forward the message to the next hop
-    forwardMessage(nodeData, nextHop)
+	// Find the next hop to the destination
+	nextHop, exists := routingTable.Entries[destNodeID]
+	if !exists {
+		log.Printf("No next hop found for destination node %d\n", destNodeID)
+		return
+	}
+
+	// Forward the message to the next hop
+	forwardMessage(nodeData, nextHop)
 }
+
 // This function sends a TaskFinished message to the registry once the node has finished its task
 func sendTaskFinishedMessage() {
 	conn, err := net.Dial("tcp", registryHostPort) // Establish a connection to the registry for sending
@@ -477,7 +523,7 @@ func sendTaskFinishedMessage() {
 	taskFinishedMsg := &minichord.MiniChord{
 		Message: &minichord.MiniChord_TaskFinished{
 			TaskFinished: &minichord.TaskFinished{
-				Id: int32(myNodeID), // Use the node's ID as the ID of the task finished message
+				Id:      int32(myNodeID), // Use the node's ID as the ID of the task finished message
 				Address: localAddr,
 			},
 		},
@@ -487,25 +533,27 @@ func sendTaskFinishedMessage() {
 		log.Println("Error sending TaskFinished message:", err)
 	} else {
 		log.Println("Sent TaskFinished message to registry")
-	
+
 	}
 }
 
 // This function sends the traffic summary to the registry
 func sendTrafficSummary(conn net.Conn) {
 	// Construct the TrafficSummary message
+	mutex.Lock()
 	trafficSummaryMsg := &minichord.MiniChord{
 		Message: &minichord.MiniChord_ReportTrafficSummary{
 			ReportTrafficSummary: &minichord.TrafficSummary{
-				Id: int32(myNodeID), // Use the node's ID as the ID of the traffic summary message
-				Sent: uint32(messagesSent),
-				Relayed: uint32(messagesRelayed),
-				Received: uint32(messagesReceived),
-				TotalSent: sumSent,
+				Id:            int32(myNodeID), // Use the node's ID as the ID of the traffic summary message
+				Sent:          uint32(messagesSent),
+				Relayed:       uint32(messagesRelayed),
+				Received:      uint32(messagesReceived),
+				TotalSent:     sumSent,
 				TotalReceived: sumReceived,
 			},
 		},
 	}
+	mutex.Unlock()
 
 	// Send the TrafficSummary message to the registry
 	if err := SendMiniChordMessage(conn, trafficSummaryMsg); err != nil {
@@ -529,12 +577,12 @@ func resetMessageCounters() {
 	mutex.Unlock() // Release the lock
 }
 
-// printStatistics prints the message statistics of the node.
+// printStatistics prints the message statistics of the node
 func printStatistics() {
-	mutex.Lock()         // Acquire the mutex to safely read the global counters.
-	defer mutex.Unlock() // Ensure the mutex is released.
+	mutex.Lock()         // Acquire the mutex to safely read the global counters
+	defer mutex.Unlock() // Ensure the mutex is released when the function exits
 
-	// Print the counters for sent, received, and relayed messages, as well as the sums of sent and received messages.
+	// Print the counters for sent, received, and relayed messages, as well as the sums of sent and received messages
 	fmt.Printf("Messages Sent: %d\n", messagesSent)
 	fmt.Printf("Messages Received: %d\n", messagesReceived)
 	fmt.Printf("Messages Relayed: %d\n", messagesRelayed)
@@ -562,12 +610,12 @@ func main() {
 
 // startCommandInterface runs the interactive command interface for the node.
 func startCommandInterface() {
-	reader := bufio.NewReader(os.Stdin)                                      // Create a reader for stdin.
-	fmt.Println("Messaging Node command interface started. Enter commands:") // Print a welcome message.
+	reader := bufio.NewReader(os.Stdin)                                      // Create a reader for stdin
+	fmt.Println("Messaging Node command interface started. Enter commands:") // Print a welcome message
 
 	for {
-		fmt.Print("> ")                     // Print the command prompt.
-		cmd, err := reader.ReadString('\n') // Read a command from stdin.
+		fmt.Print("> ")                     // Print the command prompt
+		cmd, err := reader.ReadString('\n') // Read a command from stdin
 		if err != nil {
 			fmt.Println("Error reading command:", err) // Handle errors in reading commands.
 			continue
@@ -576,7 +624,7 @@ func startCommandInterface() {
 
 		switch cmd {
 		case "print":
-			printStatistics() // Handle the 'print' command.
+			printStatistics() // Handle the 'print' command
 
 		case "exit":
 			fmt.Println("Exiting messaging node.")                        // Handle the 'exit' command.

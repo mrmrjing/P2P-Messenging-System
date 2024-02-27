@@ -8,7 +8,7 @@ import (
 	"io"
 	"log"
 	"math"
-	"math/rand" // For generating random numbers
+	"math/rand"
 	"net"
 	"os"
 	"sort"
@@ -33,16 +33,21 @@ const I64SIZE = 8
 
 // Registry is a data structure which holds the state of the server, including registered nodes and their information
 type Registry struct {
-	Nodes   map[int]NodeInfo // Map from node IDs to NodeInfo, representing all registered nodes
-	AddrMap map[string]bool  // Map from node addresses to a boolean, used to check for address uniqueness
-	Mutex   sync.RWMutex     // Mutex for safe concurrent access to the Registry's fields
+	Nodes             map[int]NodeInfo                  // Map from node IDs to NodeInfo, representing all registered nodes
+	AddrMap           map[string]bool                   // Map from node addresses to a boolean, used to check for address uniqueness
+	Mutex             sync.RWMutex                      // Mutex for safe concurrent access to the Registry's fields
+	NodesTaskFinished map[int]bool                      // Map from node IDs to a boolean, representing if the node has finished the task
+	AllNodesReady     bool                              // Flag to indicate if all nodes are ready to start
+	TrafficSummaries  map[int]*minichord.TrafficSummary // Map to store traffic summaries for each node
 }
 
 // This function creates a new instance of Registry with initialized fields, returns a pointer to the Registry type
 func NewRegistry() *Registry {
 	return &Registry{
-		Nodes:   make(map[int]NodeInfo), // Initialize the Nodes map
-		AddrMap: make(map[string]bool),  // Initialize the AddrMap
+		Nodes:             make(map[int]NodeInfo),                  // Initialize the Nodes map
+		AddrMap:           make(map[string]bool),                   // Initialize the AddrMap
+		NodesTaskFinished: make(map[int]bool),                      // Initialize the NodesTaskFinished map
+		TrafficSummaries:  make(map[int]*minichord.TrafficSummary), // Initialize the TrafficSummaries map
 	}
 }
 
@@ -63,12 +68,12 @@ func (r *Registry) Start(port string) {
 			fmt.Printf("Failed to accept connection: %s\n", err)
 			continue // If there's an error accepting the connection, skip to the next loop iteration to accept the next connection
 		}
-		go r.handleConnection(conn) // Handle the connection concurrently in a new goroutine. This allows the server to handle multiple connections simultaneously
+		go r.ection(conn) // Handle the connection concurrently in a new goroutine. This allows the server to handle multiple connections simultaneously
 	}
 }
 
 // This function deals with incoming messages from a connection, directing them to the appropriate handlers
-func (r *Registry) handleConnection(conn net.Conn) {
+func (r *Registry) ection(conn net.Conn) {
 	defer conn.Close() // Ensure the connection is closed when the function exits
 
 	// Receive and decode the incoming message from the connection
@@ -84,6 +89,21 @@ func (r *Registry) handleConnection(conn net.Conn) {
 		r.handleRegister(conn, msg.Registration) // Handle registration messages
 	case *minichord.MiniChord_Deregistration:
 		r.handleDeregister(conn, msg.Deregistration) // Handle deregistration messages
+	case *minichord.MiniChord_TaskFinished: // Handle task finished messages
+		r.handleTaskFinished(conn, msg.TaskFinished)
+	case *minichord.MiniChord_NodeRegistryResponse: // Handle node registry response messages
+		var success bool
+		const failureCode uint32 = 4294967294
+		result := msg.NodeRegistryResponse.Result // A sfixed 32 signed integer
+		if result != failureCode {
+			success = true
+		} else { // If the result is the failure code, set success to false
+			success = false
+		}
+		r.HandleNodeRegistryResponse(int(result), success) // Dispatch to the handler
+	case *minichord.MiniChord_ReportTrafficSummary: // Handle traffic summary messages
+		r.handleTrafficSummary(conn, msg.ReportTrafficSummary)
+
 	default:
 		log.Printf("Unknown message type received\n") // Log if an unknown message type is received
 	}
@@ -162,7 +182,7 @@ func SendMiniChordMessage(conn net.Conn, message *minichord.MiniChord) (err erro
 	return // Successfully sent the message
 }
 
-// This function manages the registration of new nodes within the registry
+// This function handles the registration of new nodes within the registry
 func (r *Registry) handleRegister(conn net.Conn, registration *minichord.Registration) {
 	r.Mutex.Lock()         // Lock the registry for writing, to prevent concurrent write operations
 	defer r.Mutex.Unlock() // Unlock when the function exits
@@ -231,7 +251,7 @@ func (r *Registry) handleRegister(conn net.Conn, registration *minichord.Registr
 	})
 }
 
-// This function manages the deregistration of nodes from the registry
+// This function handles the deregistration of nodes from the registry
 func (r *Registry) handleDeregister(conn net.Conn, deregistration *minichord.Deregistration) {
 	r.Mutex.Lock()         // Lock the registry for writing
 	defer r.Mutex.Unlock() // Ensure unlocking at the end of the function
@@ -245,7 +265,7 @@ func (r *Registry) handleDeregister(conn net.Conn, deregistration *minichord.Der
 		SendMiniChordMessage(conn, &minichord.MiniChord{
 			Message: &minichord.MiniChord_DeregistrationResponse{
 				DeregistrationResponse: &minichord.DeregistrationResponse{
-					Result: -1, // Use appropriate error code for "Node not registered"
+					Result: -1,
 					Info:   "Node not registered",
 				},
 			},
@@ -259,7 +279,7 @@ func (r *Registry) handleDeregister(conn net.Conn, deregistration *minichord.Der
 		SendMiniChordMessage(conn, &minichord.MiniChord{
 			Message: &minichord.MiniChord_DeregistrationResponse{
 				DeregistrationResponse: &minichord.DeregistrationResponse{
-					Result: -2, // Use appropriate error code for "Invalid node ID or address mismatch"
+					Result: -2,
 					Info:   "Invalid node ID or address mismatch",
 				},
 			},
@@ -276,7 +296,7 @@ func (r *Registry) handleDeregister(conn net.Conn, deregistration *minichord.Der
 	SendMiniChordMessage(conn, &minichord.MiniChord{
 		Message: &minichord.MiniChord_DeregistrationResponse{
 			DeregistrationResponse: &minichord.DeregistrationResponse{
-				Result: 0, // Use appropriate success code
+				Result: 0,
 				Info:   "Deregistration successful",
 			},
 		},
@@ -448,14 +468,20 @@ func (r *Registry) ListRoutes() {
 	}
 }
 
-// TODO: find out why start (n) is not working (2.5)
-// This function initiates the messaging process, sending a specified number of messages to each node.
+// TODO: find out why start (n) is not working (2.5), check that the start command can only be issued after all nodes successfully establish connections to nodes that comprise its routing table
+// This function sends a message TaskInitiate to all nodes in the overlay network
 func (r *Registry) StartMessaging(messageCount int) {
 	r.Mutex.RLock()         // Read-lock the registry for safe reading
 	defer r.Mutex.RUnlock() // Ensure unlocking at the end of the function
 
+	// Check if all nodes are ready, this is necessary as the nodes can only start messaging after all nodes are successfully connected
+	for _, ready := range r.NodesTaskFinished {
+		if !ready {
+			fmt.Println("Not all nodes are ready. Aborting messaging start.")
+			return // Exit the function if any node is not ready
+		}
+	}
 	fmt.Printf("Initiating messaging with %d messages per node...\n", messageCount)
-
 	for _, nodeInfo := range r.Nodes {
 		msg := &minichord.MiniChord{
 			Message: &minichord.MiniChord_InitiateTask{
@@ -470,12 +496,107 @@ func (r *Registry) StartMessaging(messageCount int) {
 	}
 }
 
+// This function handles the task finished messages from nodes, if the tasks is done, request traffic summaries from all nodes
+func (r *Registry) handleTaskFinished(_ net.Conn, taskFinished *minichord.TaskFinished) {
+	r.Mutex.Lock()         // Lock the registry for writing
+	defer r.Mutex.Unlock() // Ensure unlocking at the end of the function
+
+	nodeID := int(taskFinished.Id)     // Convert the node ID from the request to an integer
+	r.NodesTaskFinished[nodeID] = true // Set the task finished flag to true for the specified node
+
+	// Check if all nodes have finished the task
+	if len(r.NodesTaskFinished) == len(r.Nodes) {
+		// Request traffic summaries from all nodes
+		for _, nodeInfo := range r.Nodes {
+			msg := &minichord.MiniChord{
+				Message: &minichord.MiniChord_RequestTrafficSummary{
+					RequestTrafficSummary: &minichord.RequestTrafficSummary{},
+				},
+			}
+			if err := SendMiniChordMessage(nodeInfo.Conn, msg); err != nil {
+				log.Printf("Error requesting traffic summary for Node ID %d: %s\n", nodeInfo.ID, err)
+			}
+		}
+	}
+}
+
+// This function handles the update the setup status of nodes
+func (r *Registry) HandleNodeRegistryResponse(nodeID int, success bool) {
+	r.Mutex.Lock()
+	defer r.Mutex.Unlock()
+
+	// Update the node's setup status
+	r.NodesTaskFinished[nodeID] = success
+
+	// Check if all nodes have finished setup successfully
+	allReady := true // Assume all nodes are ready
+	for _, ready := range r.NodesTaskFinished {
+		if !ready {
+			allReady = false
+			break
+		}
+	}
+
+	// If all nodes are ready, print the readiness message and set the flag
+	if allReady {
+		r.AllNodesReady = true
+		fmt.Println("The registry is now ready to initiate tasks.")
+	}
+}
+
+// This function handles the traffic summary messages from nodes
+func (r *Registry) handleTrafficSummary(_ net.Conn, trafficSummary *minichord.TrafficSummary) {
+	r.Mutex.Lock()         // Lock the registry for writing
+	defer r.Mutex.Unlock() // Ensure unlocking at the end of the function
+
+	// Store the traffic summary for the corresponding node
+	nodeID := int(trafficSummary.Id) // Convert the node ID from the request to an integer
+	r.TrafficSummaries[nodeID] = trafficSummary
+
+	// Check if traffic summaries have been received from all nodes
+	if len(r.TrafficSummaries) == len(r.Nodes) {
+		// All summaries received, print the traffic summary for each node
+		r.printTrafficSummaries()
+	}
+}
+
+// This function prints the traffic summaries for all nodes in the form of a table
+func (r *Registry) printTrafficSummaries() {
+	fmt.Printf("%-8s %-10s %-10s %-10s %-20s %-20s\n", "Node", "Sent", "Received", "Relayed", "Total Sent", "Total Received")
+	var totalSent, totalReceived, totalRelayed int
+	var totalSumSent, totalSumReceived int64
+
+	for id, summary := range r.TrafficSummaries {
+		fmt.Printf("%-8d %-10d %-10d %-10d %-20d %-20d\n",
+			id, summary.Sent, summary.Received, summary.Relayed,
+			summary.TotalSent, summary.TotalReceived)
+
+		// Accumulate totals
+		totalSent += int(summary.Sent)
+		totalReceived += int(summary.Received)
+		totalRelayed += int(summary.Relayed)
+		totalSumSent += summary.TotalSent
+		totalSumReceived += summary.TotalReceived
+	}
+
+	// Print total row
+	fmt.Printf("%-8s %-10d %-10d %-10d %-20d %-20d\n",
+		"Sum", totalSent, totalReceived, totalRelayed, totalSumSent, totalSumReceived)
+
+	// Check for correctness
+	if totalSent == totalReceived && totalSumSent == totalSumReceived {
+		fmt.Println("Correctness verified: True")
+	} else {
+		fmt.Println("Correctness verified: False")
+	}
+}
+
 // main is the entry point of the program
 func main() {
 	// Check for the correct number of command-line arguments
 	if len(os.Args) != 2 {
 		fmt.Println("Usage: go run registry.go <registry-port>") // Print usage if incorrect arguments
-		return // Exit the program
+		return                                                   // Exit the program
 	}
 
 	registry := NewRegistry()     // Create a new registry instance
@@ -485,7 +606,7 @@ func main() {
 	reader := bufio.NewReader(os.Stdin) // Create a new reader for reading commands from stdin
 	fmt.Println("Registry command interface started. Enter commands:")
 	for {
-		fmt.Print("> ") // Print a prompt
+		fmt.Print("> ")                     // Print a prompt
 		cmd, err := reader.ReadString('\n') // Read a command from stdin
 		if err != nil {
 			fmt.Println("Error reading command:", err)
@@ -504,7 +625,7 @@ func main() {
 				if err != nil {
 					fmt.Println("Invalid number for setup command:", err)
 				} else {
-					registry.SetupOverlay(n) // Setup the overlay with the specified number of entries
+					registry.SetupOverlay(n) // Setup the overlay with the specified number of entries}
 				}
 			} else {
 				fmt.Println("Invalid setup command usage. Use 'setup <number>'.")
@@ -512,16 +633,20 @@ func main() {
 		case cmd == "route":
 			registry.ListRoutes() // List routing tables for all nodes
 		case strings.HasPrefix(cmd, "start "):
-			parts := strings.Split(cmd, " ") // Split the command into parts
-			if len(parts) == 2 {
-				n, err := strconv.Atoi(parts[1]) // Parse the number of messages for the start command
-				if err != nil {
-					fmt.Println("Invalid number for start command:", err)
+			if registry.AllNodesReady { // Check if all nodes are ready
+				parts := strings.Split(cmd, " ") // Split the command into parts
+				if len(parts) == 2 {
+					n, err := strconv.Atoi(parts[1]) // Parse the number of messages for the start command
+					if err != nil {
+						fmt.Println("Invalid number for start command:", err)
+					} else {
+						registry.StartMessaging(n) // Start the messaging process with the specified number of messages
+					}
 				} else {
-					registry.StartMessaging(n) // Start the messaging process with the specified number of messages
+					fmt.Println("Invalid start command usage. Use 'start <number>'.")
 				}
 			} else {
-				fmt.Println("Invalid start command usage. Use 'start <number>'.")
+				fmt.Println("Cannot start messaging: Not all nodes are ready.")
 			}
 		case cmd == "exit":
 			fmt.Println("Exiting registry.") // Exit command
