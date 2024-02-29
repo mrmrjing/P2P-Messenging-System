@@ -449,18 +449,19 @@ func (r *Registry) getNodeConnectionByID(nodeID int) (net.Conn, error) {
 // This function prints all currently registered nodes
 func (r *Registry) ListNodes() {
 	log.Printf("[ListNodes] Attempting to list nodes")
-	r.Mutex.Lock() // Lock the registry for writing, to prevent concurrent write operations
+	r.Mutex.RLock() // Read-lock the registry for safe reading
 	log.Printf("[ListNodes] Lock acquired for listing nodes")
 	defer func() {
-		r.Mutex.Unlock()
+		r.Mutex.RUnlock() // Ensure unlocking at the end of the function
 		log.Printf("[ListNodes] Lock released after listing nodes")
 	}()
-	// r.Mutex.RLock()         // Read-lock the registry for safe reading
-	// defer r.Mutex.RUnlock() // Ensure unlocking at the end of the function
 
 	fmt.Println("Listing all registered nodes:")
 	for id, info := range r.Nodes {
-		fmt.Printf("Node ID: %d, Address: %s\n", id, info.Addr) // Print each node's ID and address
+		// Split the address into hostname and port
+		parts := strings.Split(info.Addr, ":")                                  // Assume the address is always in the "hostname:port" format
+		hostname, port := parts[0], parts[1]                                    // Separate the hostname and the port
+		fmt.Printf("Node ID: %d, Hostname: %s, Port: %s\n", id, hostname, port) // Print each node's ID, hostname, and port number
 	}
 }
 
@@ -730,4 +731,3 @@ func main() {
 		}
 	}
 }
-
