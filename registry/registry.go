@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"google.golang.org/protobuf/proto" // For Protocol Buffers, Google's data interchange format
 )
@@ -33,21 +32,22 @@ const I64SIZE = 8
 
 // Registry is a data structure which holds the state of the server, including registered nodes and their information
 type Registry struct {
-	Nodes             map[int]NodeInfo                  // Map from node IDs to NodeInfo, representing all registered nodes
-	AddrMap           map[string]bool                   // Map from node addresses to a boolean, used to check for address uniqueness
-	Mutex             sync.RWMutex                      // Mutex for safe concurrent access to the Registry's fields
-	NodesTaskFinished map[int]bool                      // Map from node IDs to a boolean, representing if the node has finished the task
-	AllNodesReady     bool                              // Flag to indicate if all nodes are ready to start
-	TrafficSummaries  map[int]*minichord.TrafficSummary // Map to store traffic summaries for each node
+	Nodes              map[int]NodeInfo                  // Map from node IDs to NodeInfo, representing all registered nodes
+	AddrMap            map[string]bool                   // Map from node addresses to a boolean, used to check for address uniqueness
+	Mutex              sync.RWMutex                      // Mutex for safe concurrent access to the Registry's fields
+	NodesTaskFinished  map[int]bool                      // Map from node IDs to a boolean, representing if the node has finished the task
+	NodesSetupFinished map[int]bool                      // Map from node IDs to a boolean, representing if the node has finished the setup
+	TrafficSummaries   map[int]*minichord.TrafficSummary // Map to store traffic summaries for each node
 }
 
 // This function creates a new instance of Registry with initialized fields, returns a pointer to the Registry type
 func NewRegistry() *Registry {
 	return &Registry{
-		Nodes:             make(map[int]NodeInfo),                  // Initialize the Nodes map
-		AddrMap:           make(map[string]bool),                   // Initialize the AddrMap
-		NodesTaskFinished: make(map[int]bool),                      // Initialize the NodesTaskFinished map
-		TrafficSummaries:  make(map[int]*minichord.TrafficSummary), // Initialize the TrafficSummaries map
+		Nodes:              make(map[int]NodeInfo),                  // Initialize the Nodes map
+		AddrMap:            make(map[string]bool),                   // Initialize the AddrMap
+		NodesTaskFinished:  make(map[int]bool),                      // Initialize the NodesTaskFinished map
+		NodesSetupFinished: make(map[int]bool),                      // Initialize the NodesSetupFinished map
+		TrafficSummaries:   make(map[int]*minichord.TrafficSummary), // Initialize the TrafficSummaries map
 	}
 }
 
@@ -254,8 +254,6 @@ func (r *Registry) handleRegister(conn net.Conn, registration *minichord.Registr
 
 // This function handles the deregistration of nodes from the registry
 func (r *Registry) handleDeregister(conn net.Conn, deregistration *minichord.Deregistration) {
-	// r.Mutex.Lock()         // Lock the registry for writing
-	// defer r.Mutex.Unlock() // Ensure unlocking at the end of the function
 	log.Printf("[handleDeregister] Attempting to deregister node")
 	r.Mutex.Lock() // Lock the registry for writing, to prevent concurrent write operations
 	log.Printf("[handleDeregister] Lock acquired for deregistration")
@@ -313,6 +311,14 @@ func (r *Registry) handleDeregister(conn net.Conn, deregistration *minichord.Der
 
 // This function calculates and sets up routing tables for each node based on the overlay network's structure
 func (r *Registry) setupOverlay(nr int) {
+	log.Printf("[setupOverlay] Attempting to setup overlay")
+	r.Mutex.Lock() // Lock the registry for writing, to prevent concurrent write operations
+	log.Printf("[setupOverlay] Lock acquired for setting up overlay")
+	defer func() {
+		r.Mutex.Unlock()
+		log.Printf("[setupOverlay] Lock released after setting up overlay")
+	}()
+
 	// Default to 3 routing entries if not specified, where nr is the number of routing entries (table size)
 	if nr == 0 {
 		nr = 3
@@ -356,7 +362,6 @@ func (r *Registry) setupOverlay(nr int) {
 
 // This function sends the routing table to the specified node
 func (r *Registry) sendNodeRegistry(nodeID int, routingTable []NodeInfo, allNodeIDs []int) {
-	log.Printf("Sending NodeRegistry to Node %d", nodeID)
 	// Construct the message with the routing table information
 	nodeRegistryMsg := &minichord.MiniChord{
 		Message: &minichord.MiniChord_NodeRegistry{
@@ -369,14 +374,22 @@ func (r *Registry) sendNodeRegistry(nodeID int, routingTable []NodeInfo, allNode
 		},
 	}
 
-	// Retrieve the connection for the specified node in order to establish a connection to it to send them their initial setup information
-	conn, err := r.getNodeConnectionByID(nodeID)
+	// Retrieve the node's address from your system's node information storage
+	nodeAddress, err := r.getNodeAddressByID(nodeID)
 	if err != nil {
-		log.Printf("Failed to get connection for node %d: %s", nodeID, err)
-		return // Exit if the connection could not be retrieved
+		log.Printf("Failed to get address for node %d: %s", nodeID, err)
+		return // Exit if the node's address could not be retrieved
 	}
 
-	log.Printf("Connection for Node %d retrieved", nodeID)
+	// Establish a new connection to the node
+	conn, err := net.Dial("tcp", nodeAddress)
+	if err != nil {
+		log.Printf("Failed to establish a new connection to node %d at %s: %s", nodeID, nodeAddress, err)
+		return // Exit if the connection could not be established
+	}
+	defer conn.Close() // Ensure the connection is closed after this function exits
+
+	log.Printf("Established new connection to Node %d at %s", nodeID, nodeAddress)
 
 	// Send the NodeRegistry message to the node, ensuring that each node receives its unique routing table and information about all other nodes
 	if err := SendMiniChordMessage(conn, nodeRegistryMsg); err != nil {
@@ -384,6 +397,22 @@ func (r *Registry) sendNodeRegistry(nodeID int, routingTable []NodeInfo, allNode
 	} else {
 		log.Printf("Successfully sent NodeRegistry to Node %d", nodeID)
 	}
+}
+
+// This function retrieves the network address of a node identified by its ID
+func (r *Registry) getNodeAddressByID(nodeID int) (string, error) {
+	// r.Mutex.RLock() // Read lock to ensure safe access to Nodes map
+	// defer r.Mutex.RUnlock() // Ensure the lock is released after the function exits
+
+	nodeInfo, exists := r.Nodes[nodeID]
+	if !exists {
+		// No node with the provided ID was found in the registry
+		log.Printf("No node found with ID %d", nodeID)
+		return "", fmt.Errorf("no node with ID %d found", nodeID)
+	}
+
+	// Return the address of the node if it exists
+	return nodeInfo.Addr, nil
 }
 
 // This function converts a slice of NodeInfo into a slice of protobuf Deregistration messages
@@ -407,45 +436,6 @@ func convertIDsToInt32s(ids []int) []int32 {
 	return int32Ids
 }
 
-// This function retrieves a TCP connection to a node identified by its ID
-func (r *Registry) getNodeConnectionByID(nodeID int) (net.Conn, error) {
-	log.Printf("Retrieving connection for Node %d", nodeID)
-	log.Printf("[getNodeConnectionByID] Attempting to retrieve connection for Node %d", nodeID)
-	// r.Mutex.Lock() // Lock the registry for writing, to prevent concurrent write operations
-	// log.Printf("[getNodeConnectionByID] Lock acquired forNode %d", nodeID)
-	// defer func() {
-	// 	r.Mutex.Unlock()
-	// 	log.Printf("[getNodeConnectionByID] Lock released for Node %d", nodeID)
-	// }()
-	// r.Mutex.Lock() // Use Lock instead of RLock to synchronize read-modify-write operations
-	// defer r.Mutex.Unlock()
-	nodeInfo, exists := r.Nodes[nodeID]
-
-	log.Printf("NodeInfo: %v, exists: %v", nodeInfo, exists)
-
-	if !exists {
-		log.Printf("No node found with ID %d", nodeID)
-		return nil, fmt.Errorf("no node with ID %d found", nodeID) // Return an error if the node does not exist
-	}
-
-	if nodeInfo.Conn != nil {
-		log.Printf("Connection to Node %d already established", nodeID)
-		return nodeInfo.Conn, nil
-	}
-	log.Printf("No existing connection to Node %d", nodeID)
-	// Otherwise, establish a new connection to the node's address
-	conn, err := net.DialTimeout("tcp", nodeInfo.Addr, 5*time.Second)
-	if err != nil {
-		log.Printf("Failed to connect to Node %d at address %s: %s", nodeID, nodeInfo.Addr, err)
-		return nil, fmt.Errorf("failed to connect to node %d at %s: %w", nodeID, nodeInfo.Addr, err)
-	}
-
-	nodeInfo.Conn = conn       // Update the node info with the new connection
-	r.Nodes[nodeID] = nodeInfo // Update the registry with the new connection
-	log.Printf("Connection established with Node %d", nodeID)
-	return conn, nil // Return the established connection
-}
-
 // This function prints all currently registered nodes
 func (r *Registry) ListNodes() {
 	log.Printf("[ListNodes] Attempting to list nodes")
@@ -465,19 +455,8 @@ func (r *Registry) ListNodes() {
 	}
 }
 
-// TODO: find out why setup (nr) is not working
 // This function sets up the overlay network with the specified number of routing entries per node (n)
 func (r *Registry) SetupOverlay(entries int) {
-	log.Printf("[SetupOverlay] Attempting to setup overlay")
-	r.Mutex.Lock() // Lock the registry for writing, to prevent concurrent write operations
-	log.Printf("[SetupOverlay] Lock acquired for setting up overlay")
-	defer func() {
-		r.Mutex.Unlock()
-		log.Printf("[SetupOverlay] Lock released after setting up overlay")
-	}()
-	// r.Mutex.Lock()         // Lock the registry for writing
-	// defer r.Mutex.Unlock() // Ensure unlocking at the end of the function
-
 	fmt.Printf("Setting up overlay with %d entries per node...\n", entries)
 	r.setupOverlay(entries) // Setup the overlay network
 
@@ -512,7 +491,6 @@ func (r *Registry) ListRoutes() {
 	}
 }
 
-// TODO: find out why start (n) is not working (2.5), check that the start command can only be issued after all nodes successfully establish connections to nodes that comprise its routing table
 // This function sends a message TaskInitiate to all nodes in the overlay network
 func (r *Registry) StartMessaging(messageCount int) {
 	log.Printf("[StartMessaging] Attempting to start messaging with %d messages per node", messageCount)
@@ -522,16 +500,20 @@ func (r *Registry) StartMessaging(messageCount int) {
 		r.Mutex.Unlock()
 		log.Printf("[StartMessaging] Lock released after start messaging with %d messages per node", messageCount)
 	}()
-	// r.Mutex.RLock()         // Read-lock the registry for safe reading
-	// defer r.Mutex.RUnlock() // Ensure unlocking at the end of the function
 
-	// Check if all nodes are ready, this is necessary as the nodes can only start messaging after all nodes are successfully connected
-	for _, ready := range r.NodesTaskFinished {
-		if !ready {
-			fmt.Println("Not all nodes are ready. Aborting messaging start.")
-			return // Exit the function if any node is not ready
+	// Check if all nodes have finished their setup, not just their tasks
+	allSetupComplete := true
+	for id := range r.Nodes {
+		if setupComplete, exists := r.NodesSetupFinished[id]; !exists || !setupComplete {
+			allSetupComplete = false
+			break
 		}
 	}
+	if !allSetupComplete {
+		fmt.Println("Not all nodes are ready. Aborting messaging start.")
+		return // Exit the function if any node is not ready
+	}
+
 	fmt.Printf("Initiating messaging with %d messages per node...\n", messageCount)
 	for _, nodeInfo := range r.Nodes {
 		msg := &minichord.MiniChord{
@@ -547,6 +529,33 @@ func (r *Registry) StartMessaging(messageCount int) {
 	}
 }
 
+// This function handles the update of the node setup status
+func (r *Registry) HandleNodeRegistryResponse(nodeID int, success bool) {
+	log.Printf("[HandleNodeSetupComplete] Node %d setup complete status: %v", nodeID, success)
+	r.Mutex.Lock() // Lock the registry for writing, to prevent concurrent write operations
+	defer func() {
+		r.Mutex.Unlock()
+		log.Printf("[HandleNodeSetupComplete] Node %d setup status updated", nodeID)
+	}()
+
+	// Update the node's setup completion status
+	r.NodesSetupFinished[nodeID] = success
+
+	// Check if all nodes have finished setup successfully
+	allSetupComplete := len(r.NodesSetupFinished) == len(r.Nodes)
+	for id := range r.Nodes {
+		if setupComplete, exists := r.NodesSetupFinished[id]; !exists || !setupComplete {
+			allSetupComplete = false
+			break // Exit loop early if any node hasn't finished setup or failed
+		}
+	}
+
+	// If all nodes have finished setup, proceed to the next stage
+	if allSetupComplete {
+		fmt.Println("All nodes have completed setup. The registry is now ready to initiate tasks.")
+	}
+}
+
 // This function handles the task finished messages from nodes, if the tasks is done, request traffic summaries from all nodes
 func (r *Registry) handleTaskFinished(_ net.Conn, taskFinished *minichord.TaskFinished) {
 	log.Printf("[handleTaskFinished] Attempting to handle task finished message")
@@ -556,9 +565,6 @@ func (r *Registry) handleTaskFinished(_ net.Conn, taskFinished *minichord.TaskFi
 		r.Mutex.Unlock()
 		log.Printf("[handlesTaskFinished] Lock released after handling task finished message")
 	}()
-
-	// r.Mutex.Lock()         // Lock the registry for writing
-	// defer r.Mutex.Unlock() // Ensure unlocking at the end of the function
 
 	nodeID := int(taskFinished.Id)     // Convert the node ID from the request to an integer
 	r.NodesTaskFinished[nodeID] = true // Set the task finished flag to true for the specified node
@@ -576,38 +582,6 @@ func (r *Registry) handleTaskFinished(_ net.Conn, taskFinished *minichord.TaskFi
 				log.Printf("Error requesting traffic summary for Node ID %d: %s\n", nodeInfo.ID, err)
 			}
 		}
-	}
-}
-
-// This function handles the update the setup status of nodes
-func (r *Registry) HandleNodeRegistryResponse(nodeID int, success bool) {
-
-	log.Printf("[HandleNodeRegistryResponse] Attempting to handle node registry response")
-	r.Mutex.Lock() // Lock the registry for writing, to prevent concurrent write operations
-	log.Printf("[HandleNodeRegistryResponse] Lock acquired for handling node registry response")
-	defer func() {
-		r.Mutex.Unlock()
-		log.Printf("[HandleNodeRegistryResponse] Lock released after handling node registry response")
-	}()
-	// r.Mutex.Lock()
-	// defer r.Mutex.Unlock()
-
-	// Update the node's setup status
-	r.NodesTaskFinished[nodeID] = success
-
-	// Check if all nodes have finished setup successfully
-	allReady := true // Assume all nodes are ready
-	for _, ready := range r.NodesTaskFinished {
-		if !ready {
-			allReady = false
-			break
-		}
-	}
-
-	// If all nodes are ready, print the readiness message and set the flag
-	if allReady {
-		r.AllNodesReady = true
-		fmt.Println("The registry is now ready to initiate tasks.")
 	}
 }
 
@@ -708,7 +682,16 @@ func main() {
 		case cmd == "route":
 			registry.ListRoutes() // List routing tables for all nodes
 		case strings.HasPrefix(cmd, "start "):
-			if registry.AllNodesReady { // Check if all nodes are ready
+			// Check if all nodes have completed their setup instead of just checking AllNodesReady
+			allSetupComplete := true
+			for id := range registry.Nodes {
+				if setupComplete, exists := registry.NodesSetupFinished[id]; !exists || !setupComplete {
+					allSetupComplete = false
+					fmt.Printf("Node %d is not ready.\n", id)
+					break
+				}
+			}
+			if allSetupComplete { // Check if all nodes have finished setup
 				parts := strings.Split(cmd, " ") // Split the command into parts
 				if len(parts) == 2 {
 					n, err := strconv.Atoi(parts[1]) // Parse the number of messages for the start command

@@ -41,30 +41,32 @@ type RoutingTable struct {
 
 // StartNode sets up the node, registers it with the registry, and starts listening for incoming messages
 func StartNode(registryAddress string) {
+	log.Printf("[StartNode] Start: registryHostPort: %s", registryAddress) // ADDITION
+
 	localIP := getLocalIP()                          // Automatically determine the local IP address.
 	listener, err := net.Listen("tcp", localIP+":0") // Start a TCP listener on an automatically assigned port to accept incoming TCP connections
 	if err != nil {
 		fmt.Println("Error: ", err)
 		os.Exit(1) // Exit the program if unable to start listening
 	}
-	defer listener.Close() // Ensure the listener is closed when the function exits
-
-	localAddr = listener.Addr().String() // Store the local address and port where the node is listening and store as a string
-
-	fmt.Println("Node listening on", localAddr) // Print the address and port
-
+	defer listener.Close()                           // Ensure the listener is closed when the function exits
+	
+	localAddr = listener.Addr().String()             // Store the local address and port where the node is listening and store as a string
+	log.Printf("Node listening on %s", localAddr)       // Print the address and port
+	
 	registerWithRegistry(registryAddress, localAddr) // Register the node with the registry server
-
 	defer deregisterFromRegistry(registryAddress, myNodeID, localAddr) // Ensure the node is deregistered on exit
-
+	
+	log.Printf("[StartNode] After registering with registry: registryHostPort: %s", registryAddress)
 	for {
 		conn, err := listener.Accept() // Accept new incoming connections.
 		if err != nil {
-			fmt.Println("Error: ", err)
+			log.Printf("[StartNode] Error accepting connection: %s", err)
 			continue // Continue accepting other connections if there's an error.
 		}
-
-		go handleConnection(conn) // Handle each connection concurrently in a new goroutine.
+		log.Printf("[StartNode] Accepted new connection from %s", conn.RemoteAddr())
+		// Call handleConnection in a new goroutine.
+		go handleConnection(conn) // Handle each connection in a new goroutine
 	}
 }
 
@@ -87,7 +89,6 @@ func registerWithRegistry(registryAddress string, serverAddress string) {
 		fmt.Println("Error: ", err)
 		return
 	}
-	defer conn.Close() // Ensure the connection is closed on function exit
 
 	regMsg := &minichord.MiniChord{ // Create the registration message
 		Message: &minichord.MiniChord_Registration{
@@ -101,22 +102,36 @@ func registerWithRegistry(registryAddress string, serverAddress string) {
 		log.Println("Error sending registration message:", err)
 		return
 	}
-
 	response, err := ReceiveMiniChordMessage(conn) // Wait for and process the registration response from the registry
 	if err != nil {
 		fmt.Println("Error receiving response from registry: ", err)
 		return
 	}
+
+	// After successful registration, wait for and process the registration response from the registry
 	if regResponse, ok := response.Message.(*minichord.MiniChord_RegistrationResponse); ok {
+		mutex.Lock()
 		myNodeID = int(regResponse.RegistrationResponse.Result) // Update the node ID based on the response and convert it to an integer
-		fmt.Println("Registered with Node ID:", myNodeID)
+		mutex.Unlock()
+		log.Printf("[registerWithRegistry] Registered with Node ID: %d", myNodeID)
 	} else {
-		fmt.Println("Unexpected response type from registry")
+		log.Println("[registerWithRegistry] Unexpected response type from registry")
 	}
 }
 
 // This function sends a deregistration message to the registry server and handles deregistration of a node
 func deregisterFromRegistry(registryAddress string, nodeID int, serverAddress string) {
+	// Debugging statement to check the value before attempting to deregister
+	log.Printf("Attempting to deregister. Registry address: '%s', Node ID: %d, Server Address: '%s'", registryAddress, nodeID, serverAddress)
+
+	if registryAddress == "" {
+		log.Println("Deregistration failed: Registry address is empty")
+		return
+	}
+	if !strings.Contains(registryAddress, ":") {
+		log.Printf("Deregistration failed: Invalid registry address '%s'", registryAddress)
+		return
+	}
 	conn, err := net.Dial("tcp", registryAddress) // Establish a connection to the registry for deregistration
 	if err != nil {
 		fmt.Println("Error connecting to registry for deregistration:", err)
@@ -235,8 +250,7 @@ func ReceiveMiniChordMessage(conn net.Conn) (message *minichord.MiniChord, err e
 
 // This function processes messages received from a connection
 func handleConnection(conn net.Conn) {
-	defer conn.Close() // Ensure the connection is closed when the function exits
-
+	log.Printf("[handleConnection] New connection from %s", conn.RemoteAddr())
 	receivedMsg, err := ReceiveMiniChordMessage(conn) // Read and decode the incoming message
 	if err != nil {
 		fmt.Println("Error receiving message:", err)
@@ -251,7 +265,10 @@ func handleConnection(conn net.Conn) {
 		myNodeID = int(msg.RegistrationResponse.Result)
 
 	case *minichord.MiniChord_NodeRegistry: // If the message is a node registry message
+		mutex.Lock()
 		// Update the node's routing table based on the received NodeRegistry message
+		log.Printf("[handleConnection] Received NodeRegistry message: %+v", msg.NodeRegistry)
+		mutex.Unlock()
 		handleNodeRegistry(msg.NodeRegistry)
 
 	case *minichord.MiniChord_NodeData: // If the message is a NodeData message received from another node
@@ -283,7 +300,7 @@ func handleConnection(conn net.Conn) {
 		}
 
 	default:
-		fmt.Printf("Received an unknown type of message: %T\n", msg) // Log unexpected message types.
+		log.Printf("[handleConnection] Received an unknown type of message: %T", msg)
 	}
 }
 
@@ -296,8 +313,9 @@ func calculateDistance(source, destination int) int {
 }
 
 // (2.4) This function processes a NodeRegistry message, and initiate connections to the nodes that comprise its routing table, and report back to the registry
-func handleNodeRegistry(msg *minichord.NodeRegistry) {
-	mutex.Lock()                       // Acquire the mutex to safely update the routing table
+func handleNodeRegistry(msg *minichord.NodeRegistry) { // Acquire the mutex to safely update the routing table
+	log.Printf("[handleNodeRegistry] Processing NodeRegistry message: %+v", msg)
+
 	newEntries := make(map[int]string) // Create a new map for the updated routing table entries.
 	var successfulConnections []int    // List to keep track of successful connections
 	var failedConnections []int        // List to keep track of failed connections
@@ -315,6 +333,7 @@ func handleNodeRegistry(msg *minichord.NodeRegistry) {
 			}
 		}
 	}
+	mutex.Lock()
 	routingTable.Entries = newEntries // Update the routing table with the new entries
 	mutex.Unlock()                    // Ensure the mutex is released.
 
@@ -337,6 +356,7 @@ func initiateConnection(address string) error {
 
 // (2.4, 4) This function reports the status of the connections to the registry, and report if all nodes have successfully established connections to nodes in their routing table
 func reportConnectionsStatus(_, failedConnections []int) {
+	log.Printf("[reportConnectionsStatus] Entry: registryHostPort: %s", getRegistryHostPort())
 	var info string
 	var result uint32              // To indicate success or failure
 	const failureCode = 4294967294 // Maximum value of uint32 to indicate failure, as nodeId ranges from 0 to 127
@@ -357,17 +377,17 @@ func reportConnectionsStatus(_, failedConnections []int) {
 		},
 	}
 	// Send the NodeRegistry response back to the registry
-	conn, err := net.Dial("tcp", registryHostPort)
+	conn, err := net.Dial("tcp", getRegistryHostPort())
 	if err != nil {
-		log.Println("Error connecting to registry:", err)
+		log.Printf("[reportConnectionsStatus] Error connecting: %s, registryHostPort: %s", err, registryHostPort)
 		return
 	}
-	defer conn.Close() // Make sure to close the connection after sending the message
-
+	// defer conn.Close() // Make sure to close the connection after sending the message
 	if err := SendMiniChordMessage(conn, response); err != nil {
 		log.Println("Error sending NodeRegistryResponse message:", err)
 		return
 	}
+	log.Printf("[reportConnectionsStatus] Exit: Successfully sent NodeRegistryResponse")
 }
 
 // This function forwards the given message to the next hop according to the routing table
@@ -390,7 +410,7 @@ func forwardMessage(nodeData *minichord.NodeData, nextHop string) {
 		log.Printf("Failed to connect to next hop %s: %s\n", nextHop, err)
 		return
 	}
-	defer conn.Close() // Ensure the connection is closed on function exit
+	// defer conn.Close() // Ensure the connection is closed on function exit
 
 	// Wrap the original NodeData message in a new MiniChord message container
 	wrappedMsg := &minichord.MiniChord{
@@ -513,9 +533,10 @@ func sendDataPacket(destNodeID int) {
 
 // This function sends a TaskFinished message to the registry once the node has finished its task
 func sendTaskFinishedMessage() {
-	conn, err := net.Dial("tcp", registryHostPort) // Establish a connection to the registry for sending
+	log.Printf("[sendTaskFinishedMessage] Entry: registryHostPort: %s", getRegistryHostPort())
+	conn, err := net.Dial("tcp", getRegistryHostPort()) // Establish a connection to the registry for sending
 	if err != nil {
-		log.Println("Error connecting to registry for task finished message:", err)
+		log.Printf("[sendTaskFinishedMessage] Error connecting: %s, registryHostPort: %s", err, registryHostPort)
 		return
 	}
 	defer conn.Close() // Ensure the connection is closed on function exit
@@ -533,8 +554,8 @@ func sendTaskFinishedMessage() {
 		log.Println("Error sending TaskFinished message:", err)
 	} else {
 		log.Println("Sent TaskFinished message to registry")
-
 	}
+	log.Printf("[sendTaskFinishedMessage] Exit: Successfully sent TaskFinished message")
 }
 
 // This function sends the traffic summary to the registry
@@ -579,8 +600,8 @@ func resetMessageCounters() {
 
 // printStatistics prints the message statistics of the node
 func printStatistics() {
-	mutex.Lock()         // Acquire the mutex to safely read the global counters
-	defer mutex.Unlock() // Ensure the mutex is released when the function exits
+	// mutex.Lock()         // Acquire the mutex to safely read the global counters
+	// defer mutex.Unlock() // Ensure the mutex is released when the function exits
 
 	// Print the counters for sent, received, and relayed messages, as well as the sums of sent and received messages
 	fmt.Printf("Messages Sent: %d\n", messagesSent)
@@ -588,6 +609,20 @@ func printStatistics() {
 	fmt.Printf("Messages Relayed: %d\n", messagesRelayed)
 	fmt.Printf("Sum of Sent Messages: %d\n", sumSent)
 	fmt.Printf("Sum of Received Messages: %d\n", sumReceived)
+}
+
+func setRegistryHostPort(value string) {
+	mutex.Lock()         // Lock the mutex before modifying the global variable
+	defer mutex.Unlock() // Unlock the mutex after modifying the global variable
+
+	registryHostPort = value
+}
+
+func getRegistryHostPort() string {
+	mutex.Lock()         // Lock the mutex before reading the global variable
+	defer mutex.Unlock() // Unlock the mutex after reading the global variable
+
+	return registryHostPort
 }
 
 // main is the entry point of the program.
@@ -603,7 +638,14 @@ func main() {
 		return
 	}
 
-	go StartNode(registryHostPort) // Start the node in a separate goroutine.
+	// Debugging statement to check the initial value of registryHostPort
+	log.Printf("[main] Initial registryHostPort: %s", registryHostPort)
+
+	// Set the registry host port safely
+	setRegistryHostPort(os.Args[1])
+
+	// Start the node with the safe getter for registryHostPort
+	go StartNode(getRegistryHostPort())
 
 	startCommandInterface() // Start the interactive command interface.
 }
@@ -627,7 +669,8 @@ func startCommandInterface() {
 			printStatistics() // Handle the 'print' command
 
 		case "exit":
-			fmt.Println("Exiting messaging node.")                        // Handle the 'exit' command.
+			fmt.Println("Exiting messaging node.") // Handle the 'exit' command.
+			log.Printf("[startCommandInterface] Exit command received. registryHostPort: %s, Node ID: %d, Address: %s", registryHostPort, myNodeID, localAddr)
 			deregisterFromRegistry(registryHostPort, myNodeID, localAddr) // Deregister from the registry before exiting.
 
 		default:
