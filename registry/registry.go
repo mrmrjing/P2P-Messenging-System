@@ -401,9 +401,6 @@ func (r *Registry) sendNodeRegistry(nodeID int, routingTable []NodeInfo, allNode
 
 // This function retrieves the network address of a node identified by its ID
 func (r *Registry) getNodeAddressByID(nodeID int) (string, error) {
-	// r.Mutex.RLock() // Read lock to ensure safe access to Nodes map
-	// defer r.Mutex.RUnlock() // Ensure the lock is released after the function exits
-
 	nodeInfo, exists := r.Nodes[nodeID]
 	if !exists {
 		// No node with the provided ID was found in the registry
@@ -516,6 +513,15 @@ func (r *Registry) StartMessaging(messageCount int) {
 
 	fmt.Printf("Initiating messaging with %d messages per node...\n", messageCount)
 	for _, nodeInfo := range r.Nodes {
+		// Establish a new connection to the node
+		conn, err := net.Dial("tcp", nodeInfo.Addr)
+		if err != nil {
+			log.Printf("Failed to establish a new connection to node %d at %s: %s", nodeInfo.ID, nodeInfo.Addr, err)
+			continue
+		}
+		defer conn.Close() // Ensure the connection is closed after sending the message
+
+		// Construct the message for initiating messaging
 		msg := &minichord.MiniChord{
 			Message: &minichord.MiniChord_InitiateTask{
 				InitiateTask: &minichord.InitiateTask{
@@ -523,8 +529,11 @@ func (r *Registry) StartMessaging(messageCount int) {
 				},
 			},
 		}
-		if err := SendMiniChordMessage(nodeInfo.Conn, msg); err != nil {
+		// Send the InitiateTask message to the node over the new connection
+		if err := SendMiniChordMessage(conn, msg); err != nil {
 			log.Printf("Error initiating messaging for Node ID %d: %s\n", nodeInfo.ID, err)
+		} else {
+			log.Printf("Successfully initiated messaging for Node ID %d", nodeInfo.ID)
 		}
 	}
 }
@@ -533,22 +542,26 @@ func (r *Registry) StartMessaging(messageCount int) {
 func (r *Registry) HandleNodeRegistryResponse(nodeID int, success bool) {
 	log.Printf("[HandleNodeSetupComplete] Node %d setup complete status: %v", nodeID, success)
 	r.Mutex.Lock() // Lock the registry for writing, to prevent concurrent write operations
-	defer func() {
-		r.Mutex.Unlock()
-		log.Printf("[HandleNodeSetupComplete] Node %d setup status updated", nodeID)
-	}()
 
 	// Update the node's setup completion status
 	r.NodesSetupFinished[nodeID] = success
+	r.Mutex.Unlock() // // Unlock as soon as critical section is over to avoid holding lock while printing
 
+	r.Mutex.RLock() // Read-lock the registry for safe reading
+	allSetupComplete := true
 	// Check if all nodes have finished setup successfully
-	allSetupComplete := len(r.NodesSetupFinished) == len(r.Nodes)
 	for id := range r.Nodes {
-		if setupComplete, exists := r.NodesSetupFinished[id]; !exists || !setupComplete {
+		setupComplete, exists := r.NodesSetupFinished[id]
+		// If a node is missing from the setup finished map or it's not marked as complete, setup is not complete
+		if !exists || !setupComplete {
 			allSetupComplete = false
 			break // Exit loop early if any node hasn't finished setup or failed
 		}
 	}
+	r.Mutex.RUnlock() // Unlock as soon as critical section is over to avoid holding lock while printing
+
+	// Log the setup status update after releasing the lock
+	log.Printf("[HandleNodeSetupComplete] Node %d setup status updated", nodeID)
 
 	// If all nodes have finished setup, proceed to the next stage
 	if allSetupComplete {

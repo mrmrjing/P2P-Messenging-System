@@ -29,7 +29,6 @@ var (
 	mutex            sync.Mutex                                            // Mutex to ensure thread-safe access to global variables
 	registryHostPort string                                                // Address of the registry server
 	localAddr        string                                                // Local address of this node
-	isReadyToStart   bool                                          = false // Flag to indicate if the node is ready to start
 )
 
 const I64SIZE = 8 // Constant representing the size of an int64 in bytes, used for encoding/decoding
@@ -49,14 +48,14 @@ func StartNode(registryAddress string) {
 		fmt.Println("Error: ", err)
 		os.Exit(1) // Exit the program if unable to start listening
 	}
-	defer listener.Close()                           // Ensure the listener is closed when the function exits
-	
-	localAddr = listener.Addr().String()             // Store the local address and port where the node is listening and store as a string
-	log.Printf("Node listening on %s", localAddr)       // Print the address and port
-	
-	registerWithRegistry(registryAddress, localAddr) // Register the node with the registry server
+	defer listener.Close() // Ensure the listener is closed when the function exits
+
+	localAddr = listener.Addr().String()          // Store the local address and port where the node is listening and store as a string
+	log.Printf("Node listening on %s", localAddr) // Print the address and port
+
+	registerWithRegistry(registryAddress, localAddr)                   // Register the node with the registry server
 	defer deregisterFromRegistry(registryAddress, myNodeID, localAddr) // Ensure the node is deregistered on exit
-	
+
 	log.Printf("[StartNode] After registering with registry: registryHostPort: %s", registryAddress)
 	for {
 		conn, err := listener.Accept() // Accept new incoming connections.
@@ -284,20 +283,8 @@ func handleConnection(conn net.Conn) {
 		sendTrafficSummary(conn)
 
 	case *minichord.MiniChord_InitiateTask:
-		if isReadyToStart {
-			// Initiate the task of sending messages to other nodes
-			go handleInitiateTask(int(msg.InitiateTask.Packets))
-		} else {
-			fmt.Println("Node is not ready to start the task")
-		}
-
-	case *minichord.MiniChord_NodeRegistryResponse:
-		if msg.NodeRegistryResponse.Info == "All nodes ready" { // Use a unique string to indicate readiness
-			isReadyToStart = true
-			fmt.Println("Node is now ready to initiate tasks.")
-		} else {
-			fmt.Printf("Received NodeRegistryResponse: %s\n", msg.NodeRegistryResponse.Info)
-		}
+		// Initiate the task of sending messages to other nodes
+		go handleInitiateTask(int(msg.InitiateTask.Packets))
 
 	default:
 		log.Printf("[handleConnection] Received an unknown type of message: %T", msg)
