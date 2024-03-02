@@ -466,8 +466,7 @@ func handleInitiateTask(packets int) {
 		time.Sleep(time.Millisecond * 10) // wait 10ms between messages
 	}
 
-	// TODO: Check if sendTaskFinishedMessage should be called here, and not
-	// After all messages have been sent, inform the registry of task completion
+	// After all messages have been sent, inform the registry of task completion by sending a TaskFinished message
 	sendTaskFinishedMessage()
 }
 
@@ -528,6 +527,7 @@ func sendTaskFinishedMessage() {
 		return
 	}
 	defer conn.Close() // Ensure the connection is closed on function exit
+	
 	// Construct the TaskFinished message
 	taskFinishedMsg := &minichord.MiniChord{
 		Message: &minichord.MiniChord_TaskFinished{

@@ -578,14 +578,22 @@ func (r *Registry) handleTaskFinished(_ net.Conn, taskFinished *minichord.TaskFi
 		r.Mutex.Unlock()
 		log.Printf("[handlesTaskFinished] Lock released after handling task finished message")
 	}()
-
-	nodeID := int(taskFinished.Id)     // Convert the node ID from the request to an integer
+	nodeID := int(taskFinished.Id)    
 	r.NodesTaskFinished[nodeID] = true // Set the task finished flag to true for the specified node
 
 	// Check if all nodes have finished the task
 	if len(r.NodesTaskFinished) == len(r.Nodes) {
 		// Request traffic summaries from all nodes
 		for _, nodeInfo := range r.Nodes {
+			// Establish a new TCP connection to the node if it's not already connected 
+			if nodeInfo.Conn == nil {
+				conn, err := net.Dial("tcp", nodeInfo.Addr)
+				if err != nil {
+					log.Printf("Failed to establish a new connection to node %d at %s: %s", nodeInfo.ID, nodeInfo.Addr, err)
+					continue
+				}
+				defer conn.Close() // Ensure the connection is closed after sending the message
+			}
 			msg := &minichord.MiniChord{
 				Message: &minichord.MiniChord_RequestTrafficSummary{
 					RequestTrafficSummary: &minichord.RequestTrafficSummary{},
@@ -600,7 +608,6 @@ func (r *Registry) handleTaskFinished(_ net.Conn, taskFinished *minichord.TaskFi
 
 // This function handles the traffic summary messages from nodes
 func (r *Registry) handleTrafficSummary(_ net.Conn, trafficSummary *minichord.TrafficSummary) {
-
 	log.Printf("[handleTrafficSummary] Attempting to print traffic summary")
 	r.Mutex.Lock() // Lock the registry for writing, to prevent concurrent write operations
 	log.Printf("[handleTrafficSummary] Lock acquired for printing traffic summary")
@@ -608,8 +615,6 @@ func (r *Registry) handleTrafficSummary(_ net.Conn, trafficSummary *minichord.Tr
 		r.Mutex.Unlock()
 		log.Printf("[handleTrafficSummary] Lock released after printing traffic summary")
 	}()
-	// r.Mutex.Lock()         // Lock the registry for writing
-	// defer r.Mutex.Unlock() // Ensure unlocking at the end of the function
 
 	// Store the traffic summary for the corresponding node
 	nodeID := int(trafficSummary.Id) // Convert the node ID from the request to an integer
@@ -618,22 +623,25 @@ func (r *Registry) handleTrafficSummary(_ net.Conn, trafficSummary *minichord.Tr
 	// Check if traffic summaries have been received from all nodes
 	if len(r.TrafficSummaries) == len(r.Nodes) {
 		// All summaries received, print the traffic summary for each node
-		r.printTrafficSummaries()
+		r.printTrafficSummariesCSV()
 	}
 }
 
 // This function prints the traffic summaries for all nodes in the form of a table
-func (r *Registry) printTrafficSummaries() {
-	fmt.Printf("%-8s %-10s %-10s %-10s %-20s %-20s\n", "Node", "Sent", "Received", "Relayed", "Total Sent", "Total Received")
+func (r *Registry) printTrafficSummariesCSV() {
+	// Print the header in CSV format
+	fmt.Println("Node,Sent,Packets Received,Relayed,TotalSent,TotalReceived")
+
 	var totalSent, totalReceived, totalRelayed int
 	var totalSumSent, totalSumReceived int64
 
+	// Iterate through the summaries and print each in CSV format
 	for id, summary := range r.TrafficSummaries {
-		fmt.Printf("%-8d %-10d %-10d %-10d %-20d %-20d\n",
+		fmt.Printf("%d,%d,%d,%d,%d,%d\n",
 			id, summary.Sent, summary.Received, summary.Relayed,
 			summary.TotalSent, summary.TotalReceived)
 
-		// Accumulate totals
+		// Accumulate totals for final correctness verification
 		totalSent += int(summary.Sent)
 		totalReceived += int(summary.Received)
 		totalRelayed += int(summary.Relayed)
@@ -641,15 +649,15 @@ func (r *Registry) printTrafficSummaries() {
 		totalSumReceived += summary.TotalReceived
 	}
 
-	// Print total row
-	fmt.Printf("%-8s %-10d %-10d %-10d %-20d %-20d\n",
-		"Sum", totalSent, totalReceived, totalRelayed, totalSumSent, totalSumReceived)
+	// Print total summaries in CSV format
+	fmt.Printf("Total,%d,%d,%d,%d,%d\n",
+		totalSent, totalReceived, totalRelayed, totalSumSent, totalSumReceived)
 
-	// Check for correctness
+	// Print correctness verification, this part is not typically CSV but could be helpful for logging
 	if totalSent == totalReceived && totalSumSent == totalSumReceived {
-		fmt.Println("Correctness verified: True")
+		fmt.Println("Correctness,Verified")
 	} else {
-		fmt.Println("Correctness verified: False")
+		fmt.Println("Correctness,Not Verified")
 	}
 }
 
