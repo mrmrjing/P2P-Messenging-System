@@ -635,7 +635,7 @@ func (r *Registry) handleTrafficSummary(_ net.Conn, trafficSummary *minichord.Tr
 // This function prints the traffic summaries for all nodes in the form of a table
 func (r *Registry) printTrafficSummariesCSV() {
 	// Print the header in CSV format
-	fmt.Println("Node,Sent,Packets Received,Relayed,TotalSent,TotalReceived")
+	fmt.Println("Node, Sent, Packets Received, Relayed, TotalSent, TotalReceived")
 
 	var totalSent, totalReceived, totalRelayed int
 	var totalSumSent, totalSumReceived int64
@@ -647,22 +647,22 @@ func (r *Registry) printTrafficSummariesCSV() {
 			summary.TotalSent, summary.TotalReceived)
 
 		// Accumulate totals for final correctness verification
-		totalSent += int(summary.Sent)
-		totalReceived += int(summary.Received)
-		totalRelayed += int(summary.Relayed)
-		totalSumSent += summary.TotalSent
-		totalSumReceived += summary.TotalReceived
+		totalSent += int(summary.Sent)            // sendTracker
+		totalReceived += int(summary.Received)    // receiveTracker
+		totalRelayed += int(summary.Relayed)      // relayTracker
+		totalSumSent += summary.TotalSent         // sumSummation
+		totalSumReceived += summary.TotalReceived // receiveSummation
 	}
 
 	// Print total summaries in CSV format
-	fmt.Printf("Total,%d,%d,%d,%d,%d\n",
+	fmt.Printf("Total: %d, %d, %d, %d, %d\n",
 		totalSent, totalReceived, totalRelayed, totalSumSent, totalSumReceived)
 
-	// Print correctness verification, this part is not typically CSV but could be helpful for logging
+	// Print correctness verification
 	if totalSent == totalReceived && totalSumSent == totalSumReceived {
-		fmt.Println("Correctness,Verified")
+		fmt.Println("Correctness: Verified")
 	} else {
-		fmt.Println("Correctness,Not Verified")
+		fmt.Println("Correctness: Not Verified")
 	}
 }
 

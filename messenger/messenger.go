@@ -275,10 +275,8 @@ func handleConnection(conn net.Conn) {
 
 	case *minichord.MiniChord_NodeData: // If the message is a NodeData message received from another node
 		// Update the sum of received messages and increment the counter for received messages
-		mutex.Lock()                                    // Acquire the mutex to safely update the global counters
-		receiveTracker++                                // Increment the counter for received data
-		receiveSummation += int64(msg.NodeData.Payload) // Add to the sum of received data packets
-		mutex.Unlock()                                  // Release the mutex
+		mutex.Lock()   // Acquire the mutex to safely update the global counters
+		mutex.Unlock() // Release the mutex
 		processNodeDataMessage(msg.NodeData)
 
 	case *minichord.MiniChord_RequestTrafficSummary: // If the message is a request for the traffic summary
@@ -382,26 +380,29 @@ func reportConnectionsStatus(_, failedConnections []int) {
 }
 
 // This function forwards the given message to the next hop according to the routing table
-func forwardMessage(nodeData *minichord.NodeData, nextHop string) {
+func forwardMessage(nodeData *minichord.NodeData, nextHop string) error {
+
 	// Check if this node is already in the trace to prevent loops
 	currentNodeID := int32(myNodeID)
 	for _, id := range nodeData.Trace {
 		if id == currentNodeID {
 			log.Printf("Loop detected in trace: %v\n, dropping the message to avoid duplicates", nodeData.Trace)
-			return
+			return nil
 		}
 	}
+
 	// Add the current node to the trace before forwarding
 	nodeData.Trace = append(nodeData.Trace, currentNodeID)
 	// Increment the hop count
 	nodeData.Hops++
+
 	// Establish a connection to the next hop
 	conn, err := net.Dial("tcp", nextHop)
 	if err != nil {
 		log.Printf("Failed to connect to next hop %s: %s\n", nextHop, err)
-		return
+		return err
 	}
-	// defer conn.Close() // Ensure the connection is closed on function exit
+	defer conn.Close() // Ensure the connection is closed on function exit
 
 	// Wrap the original NodeData message in a new MiniChord message container
 	wrappedMsg := &minichord.MiniChord{
@@ -410,11 +411,14 @@ func forwardMessage(nodeData *minichord.NodeData, nextHop string) {
 	// Use the SendMiniChordMessage function to send the wrapped message to the next hop
 	if err := SendMiniChordMessage(conn, wrappedMsg); err != nil {
 		log.Printf("Failed to send NodeData to next hop %s: %s\n", nextHop, err)
+		return err
 	} else {
-		mutex.Lock()   // Acquire the lock to update global counters safely.
+		// Increment the relay counter only after successful send
+		mutex.Lock()   // Acquire the lock to safely update the global counters
 		relayTracker++ // Increment the counter for relayed data packets
-		mutex.Unlock() // Release the lock.
+		mutex.Unlock() // Release the lock
 	}
+	return nil
 }
 
 // This function process and forwards the given message to the next hop according to the routing table
@@ -510,11 +514,6 @@ func sendDataPacket(destNodeID int) {
 		Trace:       []int32{}, // Initially empty trace
 	}
 
-	mutex.Lock()                             // Acquire the lock to update the global counters safely
-	sendTracker++                            // Increment the counter for sent data packets
-	sendSummation += int64(nodeData.Payload) // Add to the sum of sent data packets
-	mutex.Unlock()                           // Release the lock
-
 	// Find the next hop to the destination
 	nextHop, exists := routingTable.Entries[destNodeID]
 	if !exists {
@@ -522,8 +521,17 @@ func sendDataPacket(destNodeID int) {
 		return
 	}
 
-	// Forward the message to the next hop
-	forwardMessage(nodeData, nextHop)
+	// Attempt to forward the message to the next hop
+	if err := forwardMessage(nodeData, nextHop); err != nil {
+		log.Printf("Failed to forward message to node %d: %s", destNodeID, err)
+		return
+	}
+
+	// Update global counters only after successful send
+	mutex.Lock()                             // Acquire the lock to update the global counters safely
+	sendTracker++                            // Increment the counter for sent data packets
+	sendSummation += int64(nodeData.Payload) // Add to the sum of sent data packets
+	mutex.Unlock()                           // Release the lock
 }
 
 // This function sends a TaskFinished message to the registry once the node has finished its task
