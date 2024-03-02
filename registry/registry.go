@@ -578,29 +578,34 @@ func (r *Registry) handleTaskFinished(_ net.Conn, taskFinished *minichord.TaskFi
 		r.Mutex.Unlock()
 		log.Printf("[handlesTaskFinished] Lock released after handling task finished message")
 	}()
-	nodeID := int(taskFinished.Id)    
+	nodeID := int(taskFinished.Id)
 	r.NodesTaskFinished[nodeID] = true // Set the task finished flag to true for the specified node
 
 	// Check if all nodes have finished the task
 	if len(r.NodesTaskFinished) == len(r.Nodes) {
 		// Request traffic summaries from all nodes
 		for _, nodeInfo := range r.Nodes {
-			// Establish a new TCP connection to the node if it's not already connected 
-			if nodeInfo.Conn == nil {
-				conn, err := net.Dial("tcp", nodeInfo.Addr)
-				if err != nil {
-					log.Printf("Failed to establish a new connection to node %d at %s: %s", nodeInfo.ID, nodeInfo.Addr, err)
-					continue
-				}
-				defer conn.Close() // Ensure the connection is closed after sending the message
+			// Establish a new TCP connection to the node if it's not already connected
+			conn, err := net.Dial("tcp", nodeInfo.Addr)
+			if err != nil {
+				log.Printf("Failed to establish a new connection to node %d at %s: %s", nodeInfo.ID, nodeInfo.Addr, err)
+				continue
 			}
+			// Ensure the connection is closed after sending the message
+			defer conn.Close()
+
+			// Construct the message for requesting traffic summaries
 			msg := &minichord.MiniChord{
 				Message: &minichord.MiniChord_RequestTrafficSummary{
 					RequestTrafficSummary: &minichord.RequestTrafficSummary{},
 				},
 			}
-			if err := SendMiniChordMessage(nodeInfo.Conn, msg); err != nil {
+
+			// Send the RequestTrafficSummary message to the node over the new connection
+			if err := SendMiniChordMessage(conn, msg); err != nil {
 				log.Printf("Error requesting traffic summary for Node ID %d: %s\n", nodeInfo.ID, err)
+			} else {
+				log.Printf("Successfully requested traffic summary for Node ID %d", nodeInfo.ID)
 			}
 		}
 	}

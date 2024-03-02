@@ -18,7 +18,7 @@ import (
 )
 
 // Define global variables
-var (                                     
+var (
 	sendTracker      int                                           = 0 // Counter for the number of data packets sent by the node
 	receiveTracker   int                                           = 0 // Counter for the number of data packets received by this node
 	relayTracker     int                                           = 0 // Counter for the number of data packets relayed by this node
@@ -250,11 +250,14 @@ func ReceiveMiniChordMessage(conn net.Conn) (message *minichord.MiniChord, err e
 // This function processes messages received from a connection
 func handleConnection(conn net.Conn) {
 	log.Printf("[handleConnection] New connection from %s", conn.RemoteAddr())
+	log.Printf("[handleConnection] Raw data received from %s", conn.RemoteAddr())
+
 	receivedMsg, err := ReceiveMiniChordMessage(conn) // Read and decode the incoming message
 	if err != nil {
 		fmt.Println("Error receiving message:", err)
 		return // Exit if there is an error receiving the message
 	}
+	log.Printf("[handleConnection] Decoded message from %s: %v", conn.RemoteAddr(), receivedMsg)
 
 	// Handle the message based on its type
 	switch msg := receivedMsg.Message.(type) {
@@ -272,15 +275,16 @@ func handleConnection(conn net.Conn) {
 
 	case *minichord.MiniChord_NodeData: // If the message is a NodeData message received from another node
 		// Update the sum of received messages and increment the counter for received messages
-		mutex.Lock() // Acquire the mutex to safely update the global counters
-		receiveTracker++ // Increment the counter for received data
+		mutex.Lock()                                    // Acquire the mutex to safely update the global counters
+		receiveTracker++                                // Increment the counter for received data
 		receiveSummation += int64(msg.NodeData.Payload) // Add to the sum of received data packets
-		mutex.Unlock() // Release the mutex
+		mutex.Unlock()                                  // Release the mutex
 		processNodeDataMessage(msg.NodeData)
 
 	case *minichord.MiniChord_RequestTrafficSummary: // If the message is a request for the traffic summary
+		log.Println("Received request for traffic summary")
 		// Send the traffic summary to the registry
-		sendTrafficSummary(conn)
+		sendTrafficSummary()
 
 	case *minichord.MiniChord_InitiateTask:
 		// Initiate the task of sending messages to other nodes
@@ -407,19 +411,20 @@ func forwardMessage(nodeData *minichord.NodeData, nextHop string) {
 	if err := SendMiniChordMessage(conn, wrappedMsg); err != nil {
 		log.Printf("Failed to send NodeData to next hop %s: %s\n", nextHop, err)
 	} else {
-		mutex.Lock()      // Acquire the lock to update global counters safely.
-		relayTracker++    // Increment the counter for relayed data packets
-		mutex.Unlock()    // Release the lock.
+		mutex.Lock()   // Acquire the lock to update global counters safely.
+		relayTracker++ // Increment the counter for relayed data packets
+		mutex.Unlock() // Release the lock.
 	}
 }
 
 // This function process and forwards the given message to the next hop according to the routing table
 func processNodeDataMessage(nodeData *minichord.NodeData) {
+	log.Printf("Received NodeData message: %+v", nodeData)
 	if int(nodeData.Destination) == myNodeID { // If the message is for this node
 		// The message has reached its destination.
 		fmt.Println("Message received at the destination node.")
-		mutex.Lock() // Safely update message counters
-		receiveTracker++ // Increment the counter for received data
+		mutex.Lock()                                // Safely update message counters
+		receiveTracker++                            // Increment the counter for received data
 		receiveSummation += int64(nodeData.Payload) // Add to the sum of received data packets
 		mutex.Unlock()
 	} else {
@@ -447,10 +452,12 @@ func processNodeDataMessage(nodeData *minichord.NodeData) {
 			fmt.Println("No appropriate next hop found in routing table; dropping message.")
 		}
 	}
+	log.Printf("Updated message counters: Sent: %d, Received: %d, Relayed: %d", sendTracker, receiveTracker, relayTracker)
 }
 
 // This function is called when an InitiateTask message is received
 func handleInitiateTask(packets int) {
+	log.Println("[handleInitiateTask] Entry: Starting task")
 	for i := 0; i < packets; i++ {
 		// Randomly select a destination node (excluding self)
 		destNodeID := chooseRandomNode()
@@ -468,6 +475,7 @@ func handleInitiateTask(packets int) {
 
 	// After all messages have been sent, inform the registry of task completion by sending a TaskFinished message
 	sendTaskFinishedMessage()
+	log.Println("[handleInitiateTask] Exit: Task completed")
 }
 
 // This function randomly selects a node from the routing table, excluding the current node
@@ -502,10 +510,10 @@ func sendDataPacket(destNodeID int) {
 		Trace:       []int32{}, // Initially empty trace
 	}
 
-	mutex.Lock()                       // Acquire the lock to update the global counters safely
-	sendTracker++                     // Increment the counter for sent data packets
+	mutex.Lock()                             // Acquire the lock to update the global counters safely
+	sendTracker++                            // Increment the counter for sent data packets
 	sendSummation += int64(nodeData.Payload) // Add to the sum of sent data packets
-	mutex.Unlock()                     // Release the lock
+	mutex.Unlock()                           // Release the lock
 
 	// Find the next hop to the destination
 	nextHop, exists := routingTable.Entries[destNodeID]
@@ -527,7 +535,7 @@ func sendTaskFinishedMessage() {
 		return
 	}
 	defer conn.Close() // Ensure the connection is closed on function exit
-	
+
 	// Construct the TaskFinished message
 	taskFinishedMsg := &minichord.MiniChord{
 		Message: &minichord.MiniChord_TaskFinished{
@@ -547,19 +555,26 @@ func sendTaskFinishedMessage() {
 }
 
 // This function sends the traffic summary to the registry
-func sendTrafficSummary(conn net.Conn) {
+func sendTrafficSummary() {
+	log.Printf("[sendTrafficSummary] Entry: registryHostPort: %s", getRegistryHostPort())
+	// Establish a TCP connection to the registry
+	conn, err := net.Dial("tcp", getRegistryHostPort())
+	if err != nil {
+		log.Println("Error establishing connection to registry:", err)
+		return
+	}
 	// Construct the TrafficSummary message
 	mutex.Lock()
 	trafficSummaryMsg := &minichord.MiniChord{
 		Message: &minichord.MiniChord_ReportTrafficSummary{
 			ReportTrafficSummary: &minichord.TrafficSummary{
-				Id:            int32(myNodeID), // Use the node's ID as the ID of the traffic summary message
-				Sent:          uint32(sendTracker), // no. of packets that were sent by that node
+				Id:            int32(myNodeID),        // Use the node's ID as the ID of the traffic summary message
+				Sent:          uint32(sendTracker),    // no. of packets that were sent by that node
 				Received:      uint32(receiveTracker), // no. of packets that were received by that node
-				TotalSent:     sendSummation, // summation of the sent packets
-				TotalReceived: receiveSummation, // the summation of the received packets
-				Relayed:       uint32(relayTracker), // no. of packets that were relayed by that node
-			},	
+				TotalSent:     sendSummation,          // summation of the sent packets
+				TotalReceived: receiveSummation,       // the summation of the received packets
+				Relayed:       uint32(relayTracker),   // no. of packets that were relayed by that node
+			},
 		},
 	}
 	mutex.Unlock()
@@ -573,6 +588,7 @@ func sendTrafficSummary(conn net.Conn) {
 
 	// Reset the message counters after sending the traffic summary
 	resetMessageCounters()
+	log.Printf("[sendTrafficSummary] Exit: Successfully sent TrafficSummary message")
 }
 
 // This function will reset the message counters after sending the traffic summary
