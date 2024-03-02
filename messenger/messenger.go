@@ -18,17 +18,17 @@ import (
 )
 
 // Define global variables
-var (
-	messagesSent     int                                           = 0     // Counter for the number of messages sent
-	messagesRelayed  int                                           = 0     // Counter for the number of messages relayed to other nodes
-	messagesReceived int                                           = 0     // Counter for the number of messages received
-	sumSent          int64                                         = 0     // Sum of values of all sent messages (assuming message values are integers)
-	sumReceived      int64                                         = 0     // Sum of values of all received messages
-	myNodeID         int                                                   // Global variable to store the node ID assigned by the registry
-	routingTable     = RoutingTable{Entries: make(map[int]string)}         // Routing table for forwarding messages
-	mutex            sync.Mutex                                            // Mutex to ensure thread-safe access to global variables
-	registryHostPort string                                                // Address of the registry server
-	localAddr        string                                                // Local address of this node
+var (                                     
+	sendTracker      int                                           = 0 // Counter for the number of data packets sent by the node
+	receiveTracker   int                                           = 0 // Counter for the number of data packets received by this node
+	relayTracker     int                                           = 0 // Counter for the number of data packets relayed by this node
+	sendSummation    int64                                         = 0 // Counter for the summation of the values of the data packets sent by this node
+	receiveSummation int64                                         = 0 // Counter for the summation of the values of the data packets received by this node
+	myNodeID         int                                               // Global variable to store the node ID assigned by the registry
+	routingTable     = RoutingTable{Entries: make(map[int]string)}     // Routing table for forwarding messages
+	mutex            sync.Mutex                                        // Mutex to ensure thread-safe access to global variables
+	registryHostPort string                                            // Address of the registry server
+	localAddr        string                                            // Local address of this node
 )
 
 const I64SIZE = 8 // Constant representing the size of an int64 in bytes, used for encoding/decoding
@@ -196,11 +196,11 @@ func SendMiniChordMessage(conn net.Conn, message *minichord.MiniChord) (err erro
 		log.Panicln("Short write?")
 	}
 	// Send the marshales message
-	length_, err := conn.Write(data)
+	length, err = conn.Write(data)
 	if err != nil {
 		log.Printf("SendMiniChordMessage() error sending data: %s\n", err)
 	}
-	if length_ != len(data) {
+	if length != len(data) {
 		log.Panicln("Short write?")
 	}
 	return // Successfully sent the message
@@ -221,7 +221,7 @@ func ReceiveMiniChordMessage(conn net.Conn) (message *minichord.MiniChord, err e
 		log.Printf("ReceivedMiniChordMessage() length error: expected %d bytes, got %d\n", I64SIZE, length)
 		return // Return early if the length of the received data does not match the expected size
 	}
-	numBytes := uint64(binary.BigEndian.Uint64(bs)) // Decode the length prefix
+	numBytes := int(binary.BigEndian.Uint64(bs)) // Decode the length prefix
 
 	// Get the marshaled message from the connection
 	data := make([]byte, numBytes)
@@ -273,8 +273,8 @@ func handleConnection(conn net.Conn) {
 	case *minichord.MiniChord_NodeData: // If the message is a NodeData message received from another node
 		// Update the sum of received messages and increment the counter for received messages
 		mutex.Lock() // Acquire the mutex to safely update the global counters
-		messagesReceived++
-		sumReceived += int64(msg.NodeData.Payload)
+		receiveTracker++ // Increment the counter for received data
+		receiveSummation += int64(msg.NodeData.Payload) // Add to the sum of received data packets
 		mutex.Unlock() // Release the mutex
 		processNodeDataMessage(msg.NodeData)
 
@@ -408,7 +408,7 @@ func forwardMessage(nodeData *minichord.NodeData, nextHop string) {
 		log.Printf("Failed to send NodeData to next hop %s: %s\n", nextHop, err)
 	} else {
 		mutex.Lock()      // Acquire the lock to update global counters safely.
-		messagesRelayed++ // Increment the counter for relayed messages.
+		relayTracker++    // Increment the counter for relayed data packets
 		mutex.Unlock()    // Release the lock.
 	}
 }
@@ -419,7 +419,8 @@ func processNodeDataMessage(nodeData *minichord.NodeData) {
 		// The message has reached its destination.
 		fmt.Println("Message received at the destination node.")
 		mutex.Lock() // Safely update message counters
-		messagesReceived++
+		receiveTracker++ // Increment the counter for received data
+		receiveSummation += int64(nodeData.Payload) // Add to the sum of received data packets
 		mutex.Unlock()
 	} else {
 		// Determine the directionality and check for overshooting the sink
@@ -503,8 +504,8 @@ func sendDataPacket(destNodeID int) {
 	}
 
 	mutex.Lock()                       // Acquire the lock to update the global counters safely
-	messagesSent++                     // Increment the counter for sent messages
-	sumSent += int64(nodeData.Payload) // Add the payload to the sum of sent messages
+	sendTracker++                     // Increment the counter for sent data packets
+	sendSummation += int64(nodeData.Payload) // Add to the sum of sent data packets
 	mutex.Unlock()                     // Release the lock
 
 	// Find the next hop to the destination
@@ -553,12 +554,12 @@ func sendTrafficSummary(conn net.Conn) {
 		Message: &minichord.MiniChord_ReportTrafficSummary{
 			ReportTrafficSummary: &minichord.TrafficSummary{
 				Id:            int32(myNodeID), // Use the node's ID as the ID of the traffic summary message
-				Sent:          uint32(messagesSent),
-				Relayed:       uint32(messagesRelayed),
-				Received:      uint32(messagesReceived),
-				TotalSent:     sumSent,
-				TotalReceived: sumReceived,
-			},
+				Sent:          uint32(sendTracker), // no. of packets that were sent by that node
+				Received:      uint32(receiveTracker), // no. of packets that were received by that node
+				TotalSent:     sendSummation, // summation of the sent packets
+				TotalReceived: receiveSummation, // the summation of the received packets
+				Relayed:       uint32(relayTracker), // no. of packets that were relayed by that node
+			},	
 		},
 	}
 	mutex.Unlock()
@@ -577,11 +578,11 @@ func sendTrafficSummary(conn net.Conn) {
 // This function will reset the message counters after sending the traffic summary
 func resetMessageCounters() {
 	mutex.Lock() // Acquire the lock to safely reset the message counters
-	messagesSent = 0
-	messagesRelayed = 0
-	messagesReceived = 0
-	sumSent = 0
-	sumReceived = 0
+	sendTracker = 0
+	receiveTracker = 0
+	sendSummation = 0
+	receiveSummation = 0
+	relayTracker = 0
 	mutex.Unlock() // Release the lock
 }
 
@@ -591,11 +592,11 @@ func printStatistics() {
 	// defer mutex.Unlock() // Ensure the mutex is released when the function exits
 
 	// Print the counters for sent, received, and relayed messages, as well as the sums of sent and received messages
-	fmt.Printf("Messages Sent: %d\n", messagesSent)
-	fmt.Printf("Messages Received: %d\n", messagesReceived)
-	fmt.Printf("Messages Relayed: %d\n", messagesRelayed)
-	fmt.Printf("Sum of Sent Messages: %d\n", sumSent)
-	fmt.Printf("Sum of Received Messages: %d\n", sumReceived)
+	fmt.Printf("Messages Sent: %d\n", sendTracker)
+	fmt.Printf("Messages Received: %d\n", receiveTracker)
+	fmt.Printf("Messages Relayed: %d\n", relayTracker)
+	fmt.Printf("Sum of Sent Messages: %d\n", sendSummation)
+	fmt.Printf("Sum of Received Messages: %d\n", receiveSummation)
 }
 
 func setRegistryHostPort(value string) {

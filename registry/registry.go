@@ -122,7 +122,7 @@ func ReceiveMiniChordMessage(conn net.Conn) (message *minichord.MiniChord, err e
 		log.Printf("ReceivedMiniChordMessage() length error: expected %d bytes, got %d\n", I64SIZE, length)
 		return // Return early if the length of the received data does not match the expected size
 	}
-	numBytes := uint64(binary.BigEndian.Uint64(bs)) // Decode the length prefix
+	numBytes := int(binary.BigEndian.Uint64(bs)) // Decode the length prefix
 
 	// Get the marshaled message from the connection
 	data := make([]byte, numBytes)
@@ -167,11 +167,11 @@ func SendMiniChordMessage(conn net.Conn, message *minichord.MiniChord) (err erro
 		log.Panicln("Short write?")
 	}
 	// Send the marshales message
-	length_, err := conn.Write(data)
+	length, err = conn.Write(data)
 	if err != nil {
 		log.Printf("SendMiniChordMessage() error sending data: %s\n", err)
 	}
-	if length_ != len(data) {
+	if length != len(data) {
 		log.Panicln("Short write?")
 	}
 	return // Successfully sent the message
