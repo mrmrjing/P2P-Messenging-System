@@ -439,6 +439,12 @@ func (r *Registry) StartMessaging(messageCount int) {
 		log.Printf("[StartMessaging] Lock released after start messaging with %d messages per node", messageCount)
 	}()
 
+	// Check if there are nodes in the registry
+	if len(r.Nodes) == 0 {
+		fmt.Println("No nodes registered in the registry. Messaging cannot be started.")
+		return // Exit the function early if there are no nodes
+	}
+
 	// Check if all nodes have finished their setup, not just their tasks
 	allSetupComplete := true
 	for id := range r.Nodes {
