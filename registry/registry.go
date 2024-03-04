@@ -308,29 +308,32 @@ func (r *Registry) handleDeregister(conn net.Conn, deregistration *minichord.Der
 // This function calculates and sets up routing tables for each node based on the overlay network's structure
 func (r *Registry) setupOverlay(nr int) {
 	log.Printf("[setupOverlay] Attempting to setup overlay")
-	r.Mutex.Lock() // Lock the registry for writing, to prevent concurrent write operations
+	r.Mutex.Lock()
 	log.Printf("[setupOverlay] Lock acquired for setting up overlay")
 	defer func() {
 		r.Mutex.Unlock()
 		log.Printf("[setupOverlay] Lock released after setting up overlay")
 	}()
 
+	// Check if there are nodes in the registry
+	if len(r.Nodes) == 0 {
+		fmt.Println("No nodes registered in the registry. Overlay setup aborted.")
+		return
+	}
+
 	// Default to 3 routing entries if not specified, where nr is the number of routing entries (table size)
 	if nr == 0 {
 		nr = 3
 	}
 
-	// Sort node IDs to facilitate table setup
-	// This is necessary to ensure that the routing tables are consistent across all nodes in determining which nodes are neighbors
+	// Sort node IDs to facilitate table setup, which is to ensure that the routing tables are consistent across all nodes in determining which nodes are neighbors
 	nodeIDs := make([]int, 0, len(r.Nodes))
 	for id := range r.Nodes {
 		nodeIDs = append(nodeIDs, id)
 	}
 	sort.Ints(nodeIDs) // Sort the IDs for consistent ordering
-	log.Printf("Sorted Node IDs: %v", nodeIDs)
 
-	// Iterate through each node to calculate its routing table
-	// First entry is one hop away, second entry is two hops away, third entry is four hops away, and so on
+	// Iterate through each node to calculate its routing table, First entry is one hop away, second entry is two hops away, third entry is four hops away, and so on
 	for _, nodeID := range nodeIDs {
 		var routingTable []NodeInfo // Dynamically size the table to allow skipping self-references
 		// Loop through the number of routing entries to populate the routing table
@@ -353,7 +356,6 @@ func (r *Registry) setupOverlay(nr int) {
 		// Send the routing table to each node
 		r.sendNodeRegistry(nodeID, routingTable, nodeIDs)
 	}
-	log.Println("Completed setupOverlay")
 }
 
 // This function sends the routing table to the specified node
@@ -363,7 +365,7 @@ func (r *Registry) sendNodeRegistry(nodeID int, routingTable []NodeInfo, allNode
 		Message: &minichord.MiniChord_NodeRegistry{
 			NodeRegistry: &minichord.NodeRegistry{
 				NR:    uint32(len(routingTable)),            // Number of routing entries
-				Peers: convertNodeInfoToProto(routingTable), // Convert NodeInfo to the corresponding protobuf structure
+				Peers: convertNodeInfoToProto(routingTable), // Convert NodeInfo to a repeated Deregistration map
 				NoIds: uint32(len(allNodeIDs)),              // Total number of nodes
 				Ids:   convertIDsToInt32s(allNodeIDs),       // Convert node IDs to int32 slice
 			},
@@ -374,18 +376,16 @@ func (r *Registry) sendNodeRegistry(nodeID int, routingTable []NodeInfo, allNode
 	nodeAddress, err := r.getNodeAddressByID(nodeID)
 	if err != nil {
 		log.Printf("Failed to get address for node %d: %s", nodeID, err)
-		return // Exit if the node's address could not be retrieved
+		return
 	}
 
-	// Establish a new connection to the node
+	// Establish a new connection to the node using the retrieved address
 	conn, err := net.Dial("tcp", nodeAddress)
 	if err != nil {
 		log.Printf("Failed to establish a new connection to node %d at %s: %s", nodeID, nodeAddress, err)
-		return // Exit if the connection could not be established
+		return
 	}
 	defer conn.Close() // Ensure the connection is closed after this function exits
-
-	log.Printf("Established new connection to Node %d at %s", nodeID, nodeAddress)
 
 	// Send the NodeRegistry message to the node, ensuring that each node receives its unique routing table and information about all other nodes
 	if err := SendMiniChordMessage(conn, nodeRegistryMsg); err != nil {
@@ -411,7 +411,7 @@ func (r *Registry) getNodeAddressByID(nodeID int) (string, error) {
 // This function converts a slice of NodeInfo into a slice of protobuf Deregistration messages
 func convertNodeInfoToProto(routingTable []NodeInfo) []*minichord.Deregistration {
 	peers := make([]*minichord.Deregistration, len(routingTable))
-	for i, nodeInfo := range routingTable {
+	for i, nodeInfo := range routingTable { // Iterate through the routing table and convert each entry to a Deregistration message
 		peers[i] = &minichord.Deregistration{
 			Id:      int32(nodeInfo.ID),
 			Address: nodeInfo.Addr,
@@ -424,70 +424,15 @@ func convertNodeInfoToProto(routingTable []NodeInfo) []*minichord.Deregistration
 func convertIDsToInt32s(ids []int) []int32 {
 	int32Ids := make([]int32, len(ids))
 	for i, id := range ids {
-		int32Ids[i] = int32(id) // Convert each int to int32
+		int32Ids[i] = int32(id)
 	}
 	return int32Ids
-}
-
-// This function prints all currently registered nodes
-func (r *Registry) ListNodes() {
-	log.Printf("[ListNodes] Attempting to list nodes")
-	r.Mutex.RLock() // Read-lock the registry for safe reading
-	log.Printf("[ListNodes] Lock acquired for listing nodes")
-	defer func() {
-		r.Mutex.RUnlock() // Ensure unlocking at the end of the function
-		log.Printf("[ListNodes] Lock released after listing nodes")
-	}()
-
-	fmt.Println("Listing all registered nodes:")
-	for id, info := range r.Nodes {
-		// Split the address into hostname and port
-		parts := strings.Split(info.Addr, ":")                                  // Assume the address is always in the "hostname:port" format
-		hostname, port := parts[0], parts[1]                                    // Separate the hostname and the port
-		fmt.Printf("Node ID: %d, Hostname: %s, Port: %s\n", id, hostname, port) // Print each node's ID, hostname, and port number
-	}
-}
-
-// This function sets up the overlay network with the specified number of routing entries per node (n)
-func (r *Registry) SetupOverlay(entries int) {
-	fmt.Printf("Setting up overlay with %d entries per node...\n", entries)
-	r.setupOverlay(entries) // Setup the overlay network
-
-	fmt.Println("Overlay setup complete.") // Indicate that the setup is complete
-}
-
-// This function would list the computed routing tables for each node in the overlay
-func (r *Registry) ListRoutes() {
-	log.Printf("[ListRoutes] Attempting to list routes")
-	r.Mutex.Lock() // Lock the registry for writing, to prevent concurrent write operations
-	log.Printf("[ListRoutes] Lock acquired for listing routes")
-	defer func() {
-		r.Mutex.Unlock()
-		log.Printf("[ListRoutes] Lock released after listing routes")
-	}()
-
-	// r.Mutex.RLock()         // Read-lock the registry for safe reading
-	// defer r.Mutex.RUnlock() // Ensure unlocking at the end of the function
-
-	fmt.Println("Listing routing tables for all nodes:")
-	for id, node := range r.Nodes {
-		fmt.Printf("Routing table for Node ID: %d, Address: %s\n", id, node.Addr)
-		// check if the node has a routing table and print it
-		if len(node.RoutingTable) > 0 {
-			fmt.Println("  Routes to Node IDs:")
-			for _, routeID := range node.RoutingTable {
-				fmt.Printf("    %d\n", routeID.ID)
-			}
-		} else {
-			fmt.Println("  No routes available.")
-		}
-	}
 }
 
 // This function sends a message TaskInitiate to all nodes in the overlay network
 func (r *Registry) StartMessaging(messageCount int) {
 	log.Printf("[StartMessaging] Attempting to start messaging with %d messages per node", messageCount)
-	r.Mutex.Lock() // Lock the registry for writing, to prevent concurrent write operations
+	r.Mutex.Lock()
 	log.Printf("[StartMessaging] Lock acquired for start messaging with %d messages per node", messageCount)
 	defer func() {
 		r.Mutex.Unlock()
@@ -504,7 +449,7 @@ func (r *Registry) StartMessaging(messageCount int) {
 	}
 	if !allSetupComplete {
 		fmt.Println("Not all nodes are ready. Aborting messaging start.")
-		return // Exit the function if any node is not ready
+		return
 	}
 
 	fmt.Printf("Initiating messaging with %d messages per node...\n", messageCount)
@@ -515,7 +460,7 @@ func (r *Registry) StartMessaging(messageCount int) {
 			log.Printf("Failed to establish a new connection to node %d at %s: %s", nodeInfo.ID, nodeInfo.Addr, err)
 			continue
 		}
-		defer conn.Close() // Ensure the connection is closed after sending the message
+		defer conn.Close()
 
 		// Construct the message for initiating messaging
 		msg := &minichord.MiniChord{
@@ -565,10 +510,10 @@ func (r *Registry) HandleNodeRegistryResponse(nodeID int, success bool) {
 	}
 }
 
-// This function handles the task finished messages from nodes, if the tasks is done, request traffic summaries from all nodes
+// This function handles the task finished messages from nodes, if the tasks are done, request traffic summaries from all nodes
 func (r *Registry) handleTaskFinished(_ net.Conn, taskFinished *minichord.TaskFinished) {
 	log.Printf("[handleTaskFinished] Attempting to handle task finished message")
-	r.Mutex.Lock() // Lock the registry for writing, to prevent concurrent write operations
+	r.Mutex.Lock()
 	log.Printf("[handlesTaskFinished] Lock acquired for handling task finished message")
 	defer func() {
 		r.Mutex.Unlock()
@@ -581,7 +526,7 @@ func (r *Registry) handleTaskFinished(_ net.Conn, taskFinished *minichord.TaskFi
 	if len(r.NodesTaskFinished) == len(r.Nodes) {
 		// Request traffic summaries from all nodes
 		for _, nodeInfo := range r.Nodes {
-			// Establish a new TCP connection to the node if it's not already connected
+			// Establish a new TCP connection to the node
 			conn, err := net.Dial("tcp", nodeInfo.Addr)
 			if err != nil {
 				log.Printf("Failed to establish a new connection to node %d at %s: %s", nodeInfo.ID, nodeInfo.Addr, err)
@@ -662,14 +607,88 @@ func (r *Registry) printTrafficSummariesCSV() {
 	}
 }
 
+// This function prints all currently registered nodes' hostnames, port number and node ID
+func (r *Registry) ListNodes() {
+	log.Printf("[ListNodes] Attempting to list nodes")
+	r.Mutex.RLock()
+	log.Printf("[ListNodes] Lock acquired for listing nodes")
+	defer func() {
+		r.Mutex.RUnlock()
+		log.Printf("[ListNodes] Lock released after listing nodes")
+	}()
+	fmt.Println("Listing all registered nodes:")
+	if len(r.Nodes) == 0 {
+		fmt.Println("No nodes available in the registry.")
+		return
+	}
+	for id, info := range r.Nodes {
+		// Split the address into hostname and port
+		parts := strings.Split(info.Addr, ":") // The address is always in the "hostname:port" format
+		var hostname, port string
+		if len(parts) == 2 {
+			hostname, port = parts[0], parts[1] // Separate the hostname and the port if address format is correct
+		} else {
+			log.Printf("Invalid address format for Node ID: %d, Address: %s", id, info.Addr)
+			continue
+		}
+		fmt.Printf("Node ID: %d, Hostname: %s, Port: %s\n", id, hostname, port) // Print each node's ID, hostname, and port number
+	}
+}
+
+// This function sets up the overlay network with the specified number of routing entries per node (n)
+func (r *Registry) SetupOverlay(entries int) {
+	fmt.Printf("Setting up overlay with %d entries per node...\n", entries)
+
+	// Check if there are nodes in the registry
+	r.Mutex.Lock()
+	if len(r.Nodes) == 0 {
+		fmt.Println("No nodes registered in the registry. Overlay setup aborted.")
+		r.Mutex.Unlock()
+		return
+	}
+	r.Mutex.Unlock()
+
+	// If there are nodes, proceed with setting up the overlay
+	r.setupOverlay(entries)
+	fmt.Println("Overlay setup complete.")
+}
+
+// This function would list the computed routing tables for each node in the overlay
+func (r *Registry) ListRoutes() {
+	log.Printf("[ListRoutes] Attempting to list routes")
+	r.Mutex.Lock()
+	log.Printf("[ListRoutes] Lock acquired for listing routes")
+	defer func() {
+		r.Mutex.Unlock()
+		log.Printf("[ListRoutes] Lock released after listing routes")
+	}()
+
+	fmt.Println("Listing routing tables for all nodes:")
+	if len(r.Nodes) == 0 {
+		fmt.Println("No nodes available in the registry.")
+		return
+	}
+
+	for id, node := range r.Nodes {
+		fmt.Printf("Routing table for Node ID: %d, Address: %s\n", id, node.Addr)
+		if len(node.RoutingTable) > 0 {
+			fmt.Println("  Routes to Node IDs:")
+			for _, route := range node.RoutingTable {
+				fmt.Printf("    %d\n", route.ID)
+			}
+		} else {
+			fmt.Println("  No routes available.")
+		}
+	}
+}
+
 // main is the entry point of the program
 func main() {
 	// Check for the correct number of command-line arguments
 	if len(os.Args) != 2 {
 		fmt.Println("Usage: go run registry.go <registry-port>") // Print usage if incorrect arguments
-		return                                                   // Exit the program
+		return
 	}
-
 	registry := NewRegistry()     // Create a new registry instance
 	go registry.Start(os.Args[1]) // Start the registry server in a new goroutine
 
@@ -689,20 +708,24 @@ func main() {
 		switch {
 		case cmd == "list":
 			registry.ListNodes() // List all registered nodes
-		case strings.HasPrefix(cmd, "setup "):
+
+		case strings.HasPrefix(cmd, "setup"):
 			parts := strings.Split(cmd, " ") // Split the command into parts
+			n := 3                           // Default number of entries
 			if len(parts) == 2 {
-				n, err := strconv.Atoi(parts[1]) // Parse the number of entries for the setup command
+				var err error
+				n, err = strconv.Atoi(parts[1])
 				if err != nil {
-					fmt.Println("Invalid number for setup command:", err)
-				} else {
-					registry.SetupOverlay(n) // Setup the overlay with the specified number of entries}
+					fmt.Println("Invalid number for setup command, using default value of 3:", err)
 				}
-			} else {
-				fmt.Println("Invalid setup command usage. Use 'setup <number>'.")
+			} else if len(parts) > 2 {
+				fmt.Println("Invalid setup command usage. Use 'setup <number>'. Using default value of 3.")
 			}
+			registry.SetupOverlay(n)
+
 		case cmd == "route":
 			registry.ListRoutes() // List routing tables for all nodes
+
 		case strings.HasPrefix(cmd, "start "):
 			// Check if all nodes have completed their setup instead of just checking AllNodesReady
 			allSetupComplete := true
@@ -713,10 +736,10 @@ func main() {
 					break
 				}
 			}
-			if allSetupComplete { // Check if all nodes have finished setup
+			if allSetupComplete { // If all nodes have finished setup, start messaging
 				parts := strings.Split(cmd, " ") // Split the command into parts
 				if len(parts) == 2 {
-					n, err := strconv.Atoi(parts[1]) // Parse the number of messages for the start command
+					n, err := strconv.Atoi(parts[1])
 					if err != nil {
 						fmt.Println("Invalid number for start command:", err)
 					} else {
@@ -728,11 +751,12 @@ func main() {
 			} else {
 				fmt.Println("Cannot start messaging: Not all nodes are ready.")
 			}
+
 		case cmd == "exit":
-			fmt.Println("Exiting registry.") // Exit command
-			return                           // Exit the program
+			fmt.Println("Exiting registry.")
+			return
 		default:
-			fmt.Printf("Command not understood: %s\n", cmd) // Print an error for unrecognized commands
+			fmt.Printf("Command not understood: %s\n", cmd)
 		}
 	}
 }

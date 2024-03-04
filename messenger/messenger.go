@@ -84,7 +84,7 @@ func registerWithRegistry(registryAddress string, serverAddress string) {
 	}
 
 	// Create the registration message
-	regMsg := &minichord.MiniChord{ 
+	regMsg := &minichord.MiniChord{
 		Message: &minichord.MiniChord_Registration{
 			Registration: &minichord.Registration{
 				Address: serverAddress, // Address of the messaging node in host:port format
@@ -115,9 +115,6 @@ func registerWithRegistry(registryAddress string, serverAddress string) {
 
 // This function sends a deregistration message to the registry server and handles deregistration of a node
 func deregisterFromRegistry(registryAddress string, nodeID int, serverAddress string) {
-	// Debugging statement to check the value before attempting to deregister
-	log.Printf("Attempting to deregister. Registry address: '%s', Node ID: %d, Server Address: '%s'", registryAddress, nodeID, serverAddress)
-
 	if registryAddress == "" {
 		log.Println("Deregistration failed: Registry address is empty")
 		return
@@ -126,14 +123,14 @@ func deregisterFromRegistry(registryAddress string, nodeID int, serverAddress st
 		log.Printf("Deregistration failed: Invalid registry address '%s'", registryAddress)
 		return
 	}
-	conn, err := net.Dial("tcp", registryAddress) // Establish a connection to the registry for deregistration
+	conn, err := net.Dial("tcp", registryAddress)
 	if err != nil {
 		fmt.Println("Error connecting to registry for deregistration:", err)
 		return
 	}
 	defer conn.Close() // Ensure the connection is closed on function exit
 
-	deregMsg := &minichord.MiniChord{ // Create the deregistration message.
+	deregMsg := &minichord.MiniChord{ // Create the deregistration message
 		Message: &minichord.MiniChord_Deregistration{
 			Deregistration: &minichord.Deregistration{
 				Id:      int32(nodeID), // Node ID to be deregistered
@@ -176,14 +173,14 @@ func deregisterFromRegistry(registryAddress string, nodeID int, serverAddress st
 
 // This function encodes and sends a MiniChord message to the specified connection
 func SendMiniChordMessage(conn net.Conn, message *minichord.MiniChord) (err error) {
-	data, err := proto.Marshal(message) // Marshal the message into binary format
+	data, err := proto.Marshal(message)
 	if err != nil {
 		log.Panicln("Failed to marshal message:", err)
 	}
 	// First send the number of bytes in the marshaled message
-	bs := make([]byte, I64SIZE)                       // Create a buffer for the length prefix
-	binary.BigEndian.PutUint64(bs, uint64(len(data))) // Encode the length of the data
-	length, err := conn.Write(bs)                     // Send the length prefix
+	bs := make([]byte, I64SIZE)
+	binary.BigEndian.PutUint64(bs, uint64(len(data)))
+	length, err := conn.Write(bs)
 	if err != nil {
 		log.Printf("SendMiniChordMessage() error sending length: %s\n", err)
 	}
@@ -198,14 +195,14 @@ func SendMiniChordMessage(conn net.Conn, message *minichord.MiniChord) (err erro
 	if length != len(data) {
 		log.Panicln("Short write?")
 	}
-	return // Successfully sent the message
+	return
 }
 
 // This function reads and decodes a MiniChord message from the specified connection
 func ReceiveMiniChordMessage(conn net.Conn) (message *minichord.MiniChord, err error) {
 	// First, get the number of bytes to received
-	bs := make([]byte, I64SIZE)  // Create a buffer to hold the length of the incoming message
-	length, err := conn.Read(bs) // Read the length prefix from the connection
+	bs := make([]byte, I64SIZE)
+	length, err := conn.Read(bs)
 	if err != nil {
 		if err != io.EOF {
 			log.Printf("ReceivedMiniChordMessage() read error: %s\n", err)
@@ -214,11 +211,9 @@ func ReceiveMiniChordMessage(conn net.Conn) (message *minichord.MiniChord, err e
 	}
 	if length != I64SIZE {
 		log.Printf("ReceivedMiniChordMessage() length error: expected %d bytes, got %d\n", I64SIZE, length)
-		return // Return early if the length of the received data does not match the expected size
+		return
 	}
-	numBytes := int(binary.BigEndian.Uint64(bs)) // Decode the length prefix
-
-	// Get the marshaled message from the connection
+	numBytes := int(binary.BigEndian.Uint64(bs))
 	data := make([]byte, numBytes)
 	length, err = conn.Read(data)
 	if err != nil {
@@ -229,43 +224,37 @@ func ReceiveMiniChordMessage(conn net.Conn) (message *minichord.MiniChord, err e
 	}
 	if length != int(numBytes) {
 		log.Printf("ReceivedMiniChordMessage() length error: expected %d bytes, got %d\n", numBytes, length)
-		return // Return early if the length of the received data does not match the expected size
+		return
 	}
-
-	// Unmarshal the binary data into a MiniChord message
 	message = &minichord.MiniChord{}
 	err = proto.Unmarshal(data[:length], message)
 	if err != nil {
 		log.Printf("ReceivedMiniChordMessage() unmarshal error: %s\n", err)
-		return // Return early on unmarshal error
+		return
 	}
-	return // Return the successfully unmarshaled message
+	return
 }
 
 // This function processes messages received from a connection
 func handleConnection(conn net.Conn) {
-	log.Printf("[handleConnection] New connection from %s", conn.RemoteAddr())
-	log.Printf("[handleConnection] Raw data received from %s", conn.RemoteAddr())
-
 	receivedMsg, err := ReceiveMiniChordMessage(conn) // Read and decode the incoming message
 	if err != nil {
 		fmt.Println("Error receiving message:", err)
-		return // Exit if there is an error receiving the message
+		return
 	}
-	log.Printf("[handleConnection] Decoded message from %s: %v", conn.RemoteAddr(), receivedMsg)
 
 	// Handle the message based on its type
 	switch msg := receivedMsg.Message.(type) {
 	case *minichord.MiniChord_RegistrationResponse: // If the message is a registration response from the registry
-		// Update the node's ID based with the new ID assigned by the registry
+		mutex.Lock() // Acquire the mutex to safely update the global node ID
+		// Update the node's ID with the new ID assigned by the registry
 		fmt.Println("Received registration response: ", msg.RegistrationResponse.Info)
 		myNodeID = int(msg.RegistrationResponse.Result)
+		mutex.Unlock() // Release the mutex
 
-	case *minichord.MiniChord_NodeRegistry: // If the message is a node registry message
-		mutex.Lock()
-		// Update the node's routing table based on the received NodeRegistry message
+	case *minichord.MiniChord_NodeRegistry: // If the message is a node registry message from the registry
+		// Update the node's routing table based on the received NodeRegistry message and initiate connections to the nodes in its routing table
 		log.Printf("[handleConnection] Received NodeRegistry message: %+v", msg.NodeRegistry)
-		mutex.Unlock()
 		handleNodeRegistry(msg.NodeRegistry)
 
 	case *minichord.MiniChord_NodeData: // If the message is a NodeData message received from another node
@@ -288,19 +277,10 @@ func handleConnection(conn net.Conn) {
 	}
 }
 
-// This function calculates the distance from source to destination in the ID space
-// ie. this function calculates the distance between two nodes
-func calculateDistance(source, destination int) int {
-	const IDSpaceSize = 128
-	distance := (destination - source + IDSpaceSize) % IDSpaceSize
-	return distance
-}
-
-// (2.4) This function processes a NodeRegistry message, and initiate connections to the nodes that comprise its routing table, and report back to the registry
-func handleNodeRegistry(msg *minichord.NodeRegistry) { // Acquire the mutex to safely update the routing table
+// This function processes a NodeRegistry message, and initiate connections to the nodes that comprise its routing table, and report back to the registry
+func handleNodeRegistry(msg *minichord.NodeRegistry) {
 	log.Printf("[handleNodeRegistry] Processing NodeRegistry message: %+v", msg)
-
-	newEntries := make(map[int]string) // Create a new map for the updated routing table entries.
+	newEntries := make(map[int]string) // Create a new map for the updated routing table entries
 	var successfulConnections []int    // List to keep track of successful connections
 	var failedConnections []int        // List to keep track of failed connections
 
@@ -319,7 +299,7 @@ func handleNodeRegistry(msg *minichord.NodeRegistry) { // Acquire the mutex to s
 	}
 	mutex.Lock()
 	routingTable.Entries = newEntries // Update the routing table with the new entries
-	mutex.Unlock()                    // Ensure the mutex is released.
+	mutex.Unlock()                    // Ensure the mutex is released
 
 	// Log the updated routing table
 	log.Printf("Updated routing table: %+v", routingTable.Entries)
@@ -332,13 +312,13 @@ func handleNodeRegistry(msg *minichord.NodeRegistry) { // Acquire the mutex to s
 func initiateConnection(address string) error {
 	conn, err := net.Dial("tcp", address)
 	if err != nil {
-		return err // return error if connection failed
+		return err
 	}
-	defer conn.Close() // Close the connection immediately after establishing it in this case
-	return nil         // return nil if connection was successful
+	defer conn.Close() // Close the connection immediately after establishing it in this case as we are only testing the connection
+	return nil
 }
 
-// (2.4, 4) This function reports the status of the connections to the registry, and report if all nodes have successfully established connections to nodes in their routing table
+// This function reports the status of the connections to the registry, and report if all nodes have successfully established connections to nodes in their routing table
 func reportConnectionsStatus(_, failedConnections []int) {
 	log.Printf("[reportConnectionsStatus] Entry: registryHostPort: %s", getRegistryHostPort())
 	var info string
@@ -366,7 +346,6 @@ func reportConnectionsStatus(_, failedConnections []int) {
 		log.Printf("[reportConnectionsStatus] Error connecting: %s, registryHostPort: %s", err, registryHostPort)
 		return
 	}
-	// defer conn.Close() // Make sure to close the connection after sending the message
 	if err := SendMiniChordMessage(conn, response); err != nil {
 		log.Println("Error sending NodeRegistryResponse message:", err)
 		return
@@ -374,53 +353,11 @@ func reportConnectionsStatus(_, failedConnections []int) {
 	log.Printf("[reportConnectionsStatus] Exit: Successfully sent NodeRegistryResponse")
 }
 
-// This function forwards the given message to the next hop according to the routing table
-func forwardMessage(nodeData *minichord.NodeData, nextHop string) error {
-
-	// Check if this node is already in the trace to prevent loops
-	currentNodeID := int32(myNodeID)
-	for _, id := range nodeData.Trace {
-		if id == currentNodeID {
-			log.Printf("Loop detected in trace: %v\n, dropping the message to avoid duplicates", nodeData.Trace)
-			return nil
-		}
-	}
-
-	// Add the current node to the trace before forwarding
-	nodeData.Trace = append(nodeData.Trace, currentNodeID)
-	// Increment the hop count
-	nodeData.Hops++
-
-	// Establish a connection to the next hop
-	conn, err := net.Dial("tcp", nextHop)
-	if err != nil {
-		log.Printf("Failed to connect to next hop %s: %s\n", nextHop, err)
-		return err
-	}
-	defer conn.Close() // Ensure the connection is closed on function exit
-
-	// Wrap the original NodeData message in a new MiniChord message container
-	wrappedMsg := &minichord.MiniChord{
-		Message: &minichord.MiniChord_NodeData{NodeData: nodeData},
-	}
-	// Use the SendMiniChordMessage function to send the wrapped message to the next hop
-	if err := SendMiniChordMessage(conn, wrappedMsg); err != nil {
-		log.Printf("Failed to send NodeData to next hop %s: %s\n", nextHop, err)
-		return err
-	} else {
-		// Increment the relay counter only after successful send
-		mutex.Lock()   // Acquire the lock to safely update the global counters
-		relayTracker++ // Increment the counter for relayed data packets
-		mutex.Unlock() // Release the lock
-	}
-	return nil
-}
-
 // This function process and forwards the given message to the next hop according to the routing table
 func processNodeDataMessage(nodeData *minichord.NodeData) {
 	log.Printf("Received NodeData message: %+v", nodeData)
 	if int(nodeData.Destination) == myNodeID { // If the message is for this node
-		// The message has reached its destination.
+		// The message has reached its destination
 		fmt.Println("Message received at the destination node.")
 		mutex.Lock()                                // Safely update message counters
 		receiveTracker++                            // Increment the counter for received data
@@ -452,6 +389,56 @@ func processNodeDataMessage(nodeData *minichord.NodeData) {
 		}
 	}
 	log.Printf("Updated message counters: Sent: %d, Received: %d, Relayed: %d", sendTracker, receiveTracker, relayTracker)
+}
+
+// This function calculates the distance from source to destination in the ID space
+// ie. this function calculates the distance between two nodes
+func calculateDistance(source, destination int) int {
+	const IDSpaceSize = 128
+	distance := (destination - source + IDSpaceSize) % IDSpaceSize
+	return distance
+}
+
+// This function forwards the given message to the next hop according to the routing table
+func forwardMessage(nodeData *minichord.NodeData, nextHop string) error {
+
+	// Check if this node is already in the trace to prevent loops
+	currentNodeID := int32(myNodeID)
+	for _, id := range nodeData.Trace {
+		if id == currentNodeID {
+			log.Printf("Loop detected in trace: %v\n, dropping the message to avoid duplicates", nodeData.Trace)
+			return nil
+		}
+	}
+
+	// Add the current node to the trace before forwarding
+	nodeData.Trace = append(nodeData.Trace, currentNodeID)
+	// Increment the hop count
+	nodeData.Hops++
+
+	// Establish a connection to the next hop
+	conn, err := net.Dial("tcp", nextHop)
+	if err != nil {
+		log.Printf("Failed to connect to next hop %s: %s\n", nextHop, err)
+		return err
+	}
+	defer conn.Close()
+
+	// Wrap the original NodeData message in a new MiniChord message container
+	wrappedMsg := &minichord.MiniChord{
+		Message: &minichord.MiniChord_NodeData{NodeData: nodeData},
+	}
+	// Use the SendMiniChordMessage function to send the wrapped message to the next hop
+	if err := SendMiniChordMessage(conn, wrappedMsg); err != nil {
+		log.Printf("Failed to send NodeData to next hop %s: %s\n", nextHop, err)
+		return err
+	} else {
+		// Increment the relay counter only after successful send
+		mutex.Lock()   // Acquire the lock to safely update the global counters
+		relayTracker++ // Increment the counter for relayed data packets
+		mutex.Unlock() // Release the lock
+	}
+	return nil
 }
 
 // This function is called when an InitiateTask message is received
@@ -537,7 +524,7 @@ func sendTaskFinishedMessage() {
 		log.Printf("[sendTaskFinishedMessage] Error connecting: %s, registryHostPort: %s", err, registryHostPort)
 		return
 	}
-	defer conn.Close() // Ensure the connection is closed on function exit
+	defer conn.Close()
 
 	// Construct the TaskFinished message
 	taskFinishedMsg := &minichord.MiniChord{
@@ -596,20 +583,16 @@ func sendTrafficSummary() {
 
 // This function will reset the message counters after sending the traffic summary
 func resetMessageCounters() {
-	mutex.Lock() // Acquire the lock to safely reset the message counters
-	sendTracker = 0
+	mutex.Lock() 
 	receiveTracker = 0
 	sendSummation = 0
 	receiveSummation = 0
 	relayTracker = 0
-	mutex.Unlock() // Release the lock
+	mutex.Unlock() 
 }
 
-// printStatistics prints the message statistics of the node
+// This function prints the message statistics of the node
 func printStatistics() {
-	// mutex.Lock()         // Acquire the mutex to safely read the global counters
-	// defer mutex.Unlock() // Ensure the mutex is released when the function exits
-
 	// Print the counters for sent, received, and relayed messages, as well as the sums of sent and received messages
 	fmt.Printf("Messages Sent: %d\n", sendTracker)
 	fmt.Printf("Messages Received: %d\n", receiveTracker)
@@ -618,30 +601,30 @@ func printStatistics() {
 	fmt.Printf("Sum of Received Messages: %d\n", receiveSummation)
 }
 
+// This function sets the registry host port safely
 func setRegistryHostPort(value string) {
-	mutex.Lock()         // Lock the mutex before modifying the global variable
-	defer mutex.Unlock() // Unlock the mutex after modifying the global variable
-
+	mutex.Lock()        
+	defer mutex.Unlock() 
 	registryHostPort = value
 }
 
+// This function gets the registry host port safely
 func getRegistryHostPort() string {
-	mutex.Lock()         // Lock the mutex before reading the global variable
-	defer mutex.Unlock() // Unlock the mutex after reading the global variable
-
+	mutex.Lock()        
+	defer mutex.Unlock() 
 	return registryHostPort
 }
 
-// main is the entry point of the program.
+// main is the entry point of the program
 func main() {
 	if len(os.Args) != 2 {
-		fmt.Println("Usage: go run messenger.go <registry-host:registry-port>") // Print usage instructions if incorrect arguments are provided.
+		fmt.Println("Usage: go run messenger.go <registry-host:registry-port>") // Print usage instructions if incorrect arguments are provided
 		return
 	}
 
-	registryHostPort := os.Args[1] // Get the registry address from command-line arguments.
+	registryHostPort := os.Args[1] // Get the registry address from command-line arguments
 	if !strings.Contains(registryHostPort, ":") {
-		fmt.Println("Invalid registry address. Must be in the format host:port.") // Validate the registry address format.
+		fmt.Println("Invalid registry address. Must be in the format host:port.") // Validate the registry address format
 		return
 	}
 
@@ -654,7 +637,7 @@ func main() {
 	// Start the node with the safe getter for registryHostPort
 	go StartNode(getRegistryHostPort())
 
-	startCommandInterface() // Start the interactive command interface.
+	startCommandInterface() // Start the interactive command interface
 }
 
 // startCommandInterface runs the interactive command interface for the node.
@@ -666,10 +649,10 @@ func startCommandInterface() {
 		fmt.Print("> ")                     // Print the command prompt
 		cmd, err := reader.ReadString('\n') // Read a command from stdin
 		if err != nil {
-			fmt.Println("Error reading command:", err) // Handle errors in reading commands.
+			fmt.Println("Error reading command:", err) // Handle errors in reading commands
 			continue
 		}
-		cmd = strings.TrimSpace(cmd) // Remove trailing newline characters from the command.
+		cmd = strings.TrimSpace(cmd) // Remove trailing newline characters from the command
 
 		switch cmd {
 		case "print":
@@ -678,10 +661,10 @@ func startCommandInterface() {
 		case "exit":
 			fmt.Println("Exiting messaging node.") // Handle the 'exit' command.
 			log.Printf("[startCommandInterface] Exit command received. registryHostPort: %s, Node ID: %d, Address: %s", registryHostPort, myNodeID, localAddr)
-			deregisterFromRegistry(registryHostPort, myNodeID, localAddr) // Deregister from the registry before exiting.
+			deregisterFromRegistry(registryHostPort, myNodeID, localAddr) // Deregister from the registry before exiting
 
 		default:
-			fmt.Printf("Command not understood: %s\n", cmd) // Handle unrecognized commands.
+			fmt.Printf("Command not understood: %s\n", cmd) // Handle unrecognized commands
 		}
 	}
 }
