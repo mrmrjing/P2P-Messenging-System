@@ -33,30 +33,25 @@ var (
 
 const I64SIZE = 8 // Constant representing the size of an int64 in bytes, used for encoding/decoding
 
-// RoutingTable holds the routing information for forwarding messages
+// RoutingTable holds the routing information for forwarding messages. Each node has a routing table used to route content to the sink
 type RoutingTable struct {
 	Entries map[int]string // Map of node IDs to their addresses
 }
 
-// StartNode sets up the node, registers it with the registry, and starts listening for incoming messages
+// This function sets up the node, registers it with the registry, and starts listening for incoming messages
 func StartNode(registryAddress string) {
-	log.Printf("[StartNode] Start: registryHostPort: %s", registryAddress) // ADDITION
-
+	log.Printf("[StartNode] Start: registryHostPort: %s", registryAddress)
 	localIP := getLocalIP()                          // Automatically determine the local IP address.
-	listener, err := net.Listen("tcp", localIP+":0") // Start a TCP listener on an automatically assigned port to accept incoming TCP connections
+	listener, err := net.Listen("tcp", localIP+":0") // Start a TCP listener on an automatically assigned port to accept incoming TCP connections (:0) means any available port
 	if err != nil {
 		fmt.Println("Error: ", err)
-		os.Exit(1) // Exit the program if unable to start listening
+		os.Exit(1)
 	}
-	defer listener.Close() // Ensure the listener is closed when the function exits
-
-	localAddr = listener.Addr().String()          // Store the local address and port where the node is listening and store as a string
-	log.Printf("Node listening on %s", localAddr) // Print the address and port
-
-	registerWithRegistry(registryAddress, localAddr)                   // Register the node with the registry server
+	defer listener.Close()                                             // Ensure the listener is closed when the function exits
+	localAddr = listener.Addr().String()                               // Store the local address and port where the node is listening and store as a string
+	log.Printf("Node listening on %s", localAddr)                      // Print the address and port
+	registerWithRegistry(registryAddress, localAddr)                   // Once initialisation is complete, register the node with the registry server by sending a registration message
 	defer deregisterFromRegistry(registryAddress, myNodeID, localAddr) // Ensure the node is deregistered on exit
-
-	log.Printf("[StartNode] After registering with registry: registryHostPort: %s", registryAddress)
 	for {
 		conn, err := listener.Accept() // Accept new incoming connections.
 		if err != nil {
@@ -64,8 +59,7 @@ func StartNode(registryAddress string) {
 			continue // Continue accepting other connections if there's an error.
 		}
 		log.Printf("[StartNode] Accepted new connection from %s", conn.RemoteAddr())
-		// Call handleConnection in a new goroutine.
-		go handleConnection(conn) // Handle each connection in a new goroutine
+		go handleConnection(conn) // Handle each new connection in a new goroutine
 	}
 }
 
@@ -83,16 +77,17 @@ func getLocalIP() string {
 
 // This function sends a registration message to the registry server
 func registerWithRegistry(registryAddress string, serverAddress string) {
-	conn, err := net.Dial("tcp", registryAddress) // Establish a TCP connection to the registry
+	conn, err := net.Dial("tcp", registryAddress) // Establish a new TCP connection to the registry
 	if err != nil {
 		fmt.Println("Error: ", err)
 		return
 	}
 
-	regMsg := &minichord.MiniChord{ // Create the registration message
+	// Create the registration message
+	regMsg := &minichord.MiniChord{ 
 		Message: &minichord.MiniChord_Registration{
 			Registration: &minichord.Registration{
-				Address: serverAddress, // Address of the messaging node
+				Address: serverAddress, // Address of the messaging node in host:port format
 			},
 		},
 	}

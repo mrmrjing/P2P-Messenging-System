@@ -16,7 +16,7 @@ import (
 	"strings"
 	"sync"
 
-	"google.golang.org/protobuf/proto" // For Protocol Buffers, Google's data interchange format
+	"google.golang.org/protobuf/proto"
 )
 
 // NodeInfo contains the information about a node in the network
@@ -74,11 +74,11 @@ func (r *Registry) Start(port string) {
 // This function deals with incoming messages from a connection, directing them to the appropriate handlers
 func (r *Registry) handleConnection(conn net.Conn) {
 
-	// Receive and decode the incoming message from the connection
+	// Receive and decode the incoming message sent from the messaging nodes
 	msg, err := ReceiveMiniChordMessage(conn)
 	if err != nil {
 		log.Printf("Error receiving MiniChord message: %v\n", err)
-		return // If there's an error, exit the function
+		return
 	}
 
 	// Handle the message based on its type
@@ -87,21 +87,20 @@ func (r *Registry) handleConnection(conn net.Conn) {
 		r.handleRegister(conn, msg.Registration) // Handle registration messages
 	case *minichord.MiniChord_Deregistration:
 		r.handleDeregister(conn, msg.Deregistration) // Handle deregistration messages
-	case *minichord.MiniChord_TaskFinished: // Handle task finished messages
-		r.handleTaskFinished(conn, msg.TaskFinished)
+	case *minichord.MiniChord_TaskFinished:
+		r.handleTaskFinished(conn, msg.TaskFinished) // Handle task finished messages
 	case *minichord.MiniChord_NodeRegistryResponse: // Handle node registry response messages
 		var success bool
 		const failureCode uint32 = 4294967294
 		result := msg.NodeRegistryResponse.Result // A sfixed 32 signed integer
 		if result != failureCode {
 			success = true
-		} else { // If the result is the failure code, set success to false
-			success = false
+		} else {
+			success = false // If the result is the failure code, set success to false
 		}
 		r.HandleNodeRegistryResponse(int(result), success) // Dispatch to the handler
-	case *minichord.MiniChord_ReportTrafficSummary: // Handle traffic summary messages
-		r.handleTrafficSummary(conn, msg.ReportTrafficSummary)
-
+	case *minichord.MiniChord_ReportTrafficSummary:
+		r.handleTrafficSummary(conn, msg.ReportTrafficSummary) // Handle traffic summary messages
 	default:
 		log.Printf("Unknown message type received\n") // Log if an unknown message type is received
 	}
@@ -110,8 +109,8 @@ func (r *Registry) handleConnection(conn net.Conn) {
 // This function reads and decodes a MiniChord message from the specified connection
 func ReceiveMiniChordMessage(conn net.Conn) (message *minichord.MiniChord, err error) {
 	// First, get the number of bytes to received
-	bs := make([]byte, I64SIZE)  // Create a buffer to hold the length of the incoming message
-	length, err := conn.Read(bs) // Read the length prefix from the connection
+	bs := make([]byte, I64SIZE)
+	length, err := conn.Read(bs)
 	if err != nil {
 		if err != io.EOF {
 			log.Printf("ReceivedMiniChordMessage() read error: %s\n", err)
@@ -120,11 +119,9 @@ func ReceiveMiniChordMessage(conn net.Conn) (message *minichord.MiniChord, err e
 	}
 	if length != I64SIZE {
 		log.Printf("ReceivedMiniChordMessage() length error: expected %d bytes, got %d\n", I64SIZE, length)
-		return // Return early if the length of the received data does not match the expected size
+		return
 	}
-	numBytes := int(binary.BigEndian.Uint64(bs)) // Decode the length prefix
-
-	// Get the marshaled message from the connection
+	numBytes := int(binary.BigEndian.Uint64(bs))
 	data := make([]byte, numBytes)
 	length, err = conn.Read(data)
 	if err != nil {
@@ -135,38 +132,35 @@ func ReceiveMiniChordMessage(conn net.Conn) (message *minichord.MiniChord, err e
 	}
 	if length != int(numBytes) {
 		log.Printf("ReceivedMiniChordMessage() length error: expected %d bytes, got %d\n", numBytes, length)
-		return // Return early if the length of the received data does not match the expected size
+		return
 	}
-
-	// Unmarshal the binary data into a MiniChord message
 	message = &minichord.MiniChord{}
 	err = proto.Unmarshal(data[:length], message)
 	if err != nil {
 		log.Printf("ReceivedMiniChordMessage() unmarshal error: %s\n", err)
-		return // Return early on unmarshal error
+		return
 	}
-	return // Return the successfully unmarshaled message
+	return
 }
 
 // This function encodes and sends a MiniChord message to the specified connection
 func SendMiniChordMessage(conn net.Conn, message *minichord.MiniChord) (err error) {
-	data, err := proto.Marshal(message) // Marshal the message into binary format
+	data, err := proto.Marshal(message)
 	log.Printf("SendMiniChordMessage(): sending %s (%v), %d to %s\n",
 		message, data, len(data), conn.RemoteAddr().String())
 	if err != nil {
 		log.Panicln("Failed to marshal message:", err)
 	}
 	// First send the number of bytes in the marshaled message
-	bs := make([]byte, I64SIZE)                       // Create a buffer for the length prefix
-	binary.BigEndian.PutUint64(bs, uint64(len(data))) // Encode the length of the data
-	length, err := conn.Write(bs)                     // Send the length prefix
+	bs := make([]byte, I64SIZE)
+	binary.BigEndian.PutUint64(bs, uint64(len(data)))
+	length, err := conn.Write(bs)
 	if err != nil {
 		log.Printf("SendMiniChordMessage() error sending length: %s\n", err)
 	}
 	if length != I64SIZE {
 		log.Panicln("Short write?")
 	}
-	// Send the marshales message
 	length, err = conn.Write(data)
 	if err != nil {
 		log.Printf("SendMiniChordMessage() error sending data: %s\n", err)
@@ -174,7 +168,7 @@ func SendMiniChordMessage(conn net.Conn, message *minichord.MiniChord) (err erro
 	if length != len(data) {
 		log.Panicln("Short write?")
 	}
-	return // Successfully sent the message
+	return
 }
 
 // This function handles the registration of new nodes within the registry
@@ -186,8 +180,6 @@ func (r *Registry) handleRegister(conn net.Conn, registration *minichord.Registr
 		r.Mutex.Unlock()
 		log.Printf("[handleRegister] Lock released after registration")
 	}()
-	// defer r.Mutex.Unlock() // Unlock when the function exits
-
 	fullAddr := registration.Address                                     // Extract the address from the registration message
 	log.Printf("Attempting to register node with address: %s", fullAddr) // Log the attempt to register
 
@@ -196,33 +188,20 @@ func (r *Registry) handleRegister(conn net.Conn, registration *minichord.Registr
 		SendMiniChordMessage(conn, &minichord.MiniChord{
 			Message: &minichord.MiniChord_RegistrationResponse{
 				RegistrationResponse: &minichord.RegistrationResponse{
-					Result: -3,
+					Result: -3, // A negative number indicates failure
 					Info:   "Node already registered",
 				},
 			},
 		})
-		return // Exit the function to prevent further processing
+		return
 	}
 
-	// Generate a unique new node ID while ensuring that no duplicate IDs are assigned
-	var nodeID int
-	for {
-		nodeID = rand.Intn(128)                    // Generate a random node ID (0-127)
-		if _, exists := r.Nodes[nodeID]; !exists { // Check if the generated ID is already in use by searching through the Nodes map
-			break // Stop the loop if the generated ID is not in use, otherwise continue to generate a new ID
-		}
-	}
-
-	// Verify that the connection's remote address matches the provided address, handling potential mismatches
+	// Verify that the connection's remote address matches the provided address
 	remoteAddr := conn.RemoteAddr().(*net.TCPAddr) // Type assert the remote address to a TCP address
 	providedIP := strings.Split(fullAddr, ":")[0]  // Extract the IP part of the provided address, and leaving out the port number
 
-	// Log the remote and provided IP addresses for diagnostics
-	// log.Printf("Provided IP: %s, Remote IP: %s", providedIP, remoteAddr.IP.String())
-
-	// Allow local connections regardless of the provided IP
+	// Allow local connections regardless of the provided IP, only reject if it's a non-local connection and the IPs don't match
 	if !remoteAddr.IP.IsLoopback() && remoteAddr.IP.String() != providedIP {
-		// Only reject if it's a non-local connection and the IPs don't match
 		SendMiniChordMessage(conn, &minichord.MiniChord{
 			Message: &minichord.MiniChord_RegistrationResponse{
 				RegistrationResponse: &minichord.RegistrationResponse{
@@ -231,7 +210,16 @@ func (r *Registry) handleRegister(conn net.Conn, registration *minichord.Registr
 				},
 			},
 		})
-		return // Exit if the IP addresses do not match
+		return
+	}
+
+	// Generate a unique new node ID (0-127) while ensuring that no duplicate IDs are assigned
+	var nodeID int
+	for {
+		nodeID = rand.Intn(128)                    // Generate a random node ID (0-127)
+		if _, exists := r.Nodes[nodeID]; !exists { // Check if the generated ID is already in use by searching through the Nodes map
+			break // Stop the loop if the generated ID is not in use, otherwise continue to generate a new ID
+		}
 	}
 
 	// Add the node to the registry after passing all checks
@@ -242,7 +230,7 @@ func (r *Registry) handleRegister(conn net.Conn, registration *minichord.Registr
 	successMessage := fmt.Sprintf("Registration request successful. The number of messaging nodes currently constituting the overlay is (%d).", len(r.Nodes))
 
 	// Upon successful registration, send a success messge back to client
-	SendMiniChordMessage(conn, &minichord.MiniChord{
+	err := SendMiniChordMessage(conn, &minichord.MiniChord{
 		Message: &minichord.MiniChord_RegistrationResponse{
 			RegistrationResponse: &minichord.RegistrationResponse{
 				Result: int32(nodeID),
@@ -250,19 +238,28 @@ func (r *Registry) handleRegister(conn net.Conn, registration *minichord.Registr
 			},
 		},
 	})
+	// Check if the message was successfully sent. In the rare case that a messaging node fails just after it sends a registration request, delete the node from the NodeInfo
+	if err != nil {
+		log.Printf("[handleRegister] Failed to send registration response to node %d at %s", nodeID, fullAddr)
+		r.Mutex.Lock()
+		delete(r.Nodes, nodeID)
+		delete(r.AddrMap, fullAddr)
+		r.Mutex.Unlock()
+		log.Printf("[handleRegister] Removed node %d from registry due to communication failure", nodeID)
+		return
+	}
 }
 
 // This function handles the deregistration of nodes from the registry
 func (r *Registry) handleDeregister(conn net.Conn, deregistration *minichord.Deregistration) {
 	log.Printf("[handleDeregister] Attempting to deregister node")
-	r.Mutex.Lock() // Lock the registry for writing, to prevent concurrent write operations
+	r.Mutex.Lock()
 	log.Printf("[handleDeregister] Lock acquired for deregistration")
 	defer func() {
 		r.Mutex.Unlock()
 		log.Printf("[handledeRegister] Lock released after deregistration")
 	}()
-
-	nodeID := int(deregistration.Id) // Convert the node ID from the request to an integer
+	nodeID := int(deregistration.Id)
 
 	// Retrieve the registered node information using the provided ID and validate
 	nodeInfo, ok := r.Nodes[nodeID]
@@ -276,7 +273,7 @@ func (r *Registry) handleDeregister(conn net.Conn, deregistration *minichord.Der
 				},
 			},
 		})
-		return // Exit if the node ID is not found
+		return
 	}
 
 	// Verify that the address matches the registered information
@@ -290,7 +287,7 @@ func (r *Registry) handleDeregister(conn net.Conn, deregistration *minichord.Der
 				},
 			},
 		})
-		return // Exit if the address does not match
+		return
 	}
 
 	// Remove the node from the registry after passing all validations
@@ -298,7 +295,6 @@ func (r *Registry) handleDeregister(conn net.Conn, deregistration *minichord.Der
 	delete(r.AddrMap, deregistration.Address)
 
 	// Send a positive response to the node indicating successful deregistration
-	// TODO: Test if response is sent to client after deregistration
 	SendMiniChordMessage(conn, &minichord.MiniChord{
 		Message: &minichord.MiniChord_DeregistrationResponse{
 			DeregistrationResponse: &minichord.DeregistrationResponse{
