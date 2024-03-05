@@ -339,11 +339,18 @@ func (r *Registry) setupOverlay(nr int) {
 		// Loop through the number of routing entries to populate the routing table
 		for i := 0; i < nr; i++ {
 			hop := int(math.Pow(2, float64(i)))                              // Define a variable hop that represents the distance to the next node, where i is the index of the entry in the table
-			index := (sort.SearchInts(nodeIDs, nodeID) + hop) % len(nodeIDs) // Find the corresponding node index, wrapping around to the beginning if hop calculation exceeds the number of nodes
-			peerID := nodeIDs[index]                                         // Get the peer node's ID
-			// Check to avoid adding the same node to the routing table
-			if peerID != nodeID {
-				routingTable = append(routingTable, r.Nodes[peerID]) // Add the peer node's info to the routing table
+			tempIndex := (nodeID + hop) % len(nodeIDs)
+
+			index := nodeIDs[0] // Assign the smallest to be the value
+			routingTable = append(routingTable, r.Nodes[index])
+			// Find the next highest to store into the routing table at that index position
+			for _, nodeSearchID := range nodeIDs {
+				if nodeSearchID >= tempIndex {
+					// Add routing table entry to the nodeSearchID
+					routingTable = routingTable[:len(routingTable)-1]
+					routingTable = append(routingTable, r.Nodes[nodeSearchID]) 
+					break
+				}
 			}
 		}
 		log.Printf("Node %d routing table: %v", nodeID, routingTable)
@@ -526,7 +533,7 @@ func (r *Registry) handleTaskFinished(_ net.Conn, taskFinished *minichord.TaskFi
 		log.Printf("[handlesTaskFinished] Lock released after handling task finished message")
 	}()
 	nodeID := int(taskFinished.Id)
-	r.NodesTaskFinished[nodeID] = true // Set the task finished flag to true for the specified node
+hed[nodeID] = true // Set the task finished flag to true for the specified node
 
 	// Check if all nodes have finished the task
 	if len(r.NodesTaskFinished) == len(r.Nodes) {
