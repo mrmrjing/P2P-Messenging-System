@@ -19,6 +19,12 @@ import (
 
 // Define global variables
 var (
+	totalSent             int   = 0 // Counter for the total number of data packets sent by all nodes (Node)
+	totalReceived         int   = 0 // Counter for the total number of data packets received by all nodes (Node)
+	totalRelayed          int   = 0 // Counter for the total number of data packets relayed by all nodes (Node)
+	totalSendSummation    int64 = 0 // Counter for the total summation of the values of the data packets sent by all nodes (Node)
+	totalReceiveSummation int64 = 0 // Counter for the total summation of the values of the data packets received by all nodes (Node)
+
 	sendTracker      int                                           = 0 // Counter for the number of data packets sent by the node
 	receiveTracker   int                                           = 0 // Counter for the number of data packets received by this node
 	relayTracker     int                                           = 0 // Counter for the number of data packets relayed by this node
@@ -359,9 +365,11 @@ func processNodeDataMessage(nodeData *minichord.NodeData) {
 	if int(nodeData.Destination) == myNodeID { // If the message is for this node
 		// The message has reached its destination
 		fmt.Println("Message received at the destination node.")
-		mutex.Lock()                                // Safely update message counters
-		receiveTracker++                            // Increment the counter for received data
-		receiveSummation += int64(nodeData.Payload) // Add to the sum of received data packets
+		mutex.Lock()                                     // Safely update message counters
+		totalReceived++                                  // Increment the counter for total received data
+		totalReceiveSummation += int64(nodeData.Payload) // Add to the sum of received data packets
+		receiveTracker++                                 // Increment the counter for received data
+		receiveSummation += int64(nodeData.Payload)      // Add to the sum of received data packets
 		mutex.Unlock()
 	} else {
 		// Determine the directionality and check for overshooting the sink
@@ -436,6 +444,7 @@ func forwardMessage(nodeData *minichord.NodeData, nextHop string) error {
 		// Increment the relay counter only after successful send
 		mutex.Lock()   // Acquire the lock to safely update the global counters
 		relayTracker++ // Increment the counter for relayed data packets
+		totalRelayed++ // Increment the counter for total relayed data packets
 		mutex.Unlock() // Release the lock
 	}
 	return nil
@@ -511,9 +520,11 @@ func sendDataPacket(destNodeID int) {
 
 	// Update global counters only after successful send
 	mutex.Lock()                             // Acquire the lock to update the global counters safely
+	totalSent++                              // Increment the counter for total sent data packets
 	sendTracker++                            // Increment the counter for sent data packets
 	sendSummation += int64(nodeData.Payload) // Add to the sum of sent data packets
-	mutex.Unlock()                           // Release the lock
+	totalSendSummation += int64(nodeData.Payload)
+	mutex.Unlock() // Release the lock
 }
 
 // This function sends a TaskFinished message to the registry once the node has finished its task
@@ -553,6 +564,8 @@ func sendTrafficSummary() {
 		log.Println("Error establishing connection to registry:", err)
 		return
 	}
+	defer conn.Close()
+
 	// Construct the TrafficSummary message
 	mutex.Lock()
 	trafficSummaryMsg := &minichord.MiniChord{
@@ -583,35 +596,36 @@ func sendTrafficSummary() {
 
 // This function will reset the message counters after sending the traffic summary
 func resetMessageCounters() {
-	mutex.Lock() 
+	mutex.Lock()
+	sendTracker = 0
 	receiveTracker = 0
 	sendSummation = 0
 	receiveSummation = 0
 	relayTracker = 0
-	mutex.Unlock() 
+	mutex.Unlock()
 }
 
 // This function prints the message statistics of the node
 func printStatistics() {
 	// Print the counters for sent, received, and relayed messages, as well as the sums of sent and received messages
-	fmt.Printf("Messages Sent: %d\n", sendTracker)
-	fmt.Printf("Messages Received: %d\n", receiveTracker)
-	fmt.Printf("Messages Relayed: %d\n", relayTracker)
-	fmt.Printf("Sum of Sent Messages: %d\n", sendSummation)
-	fmt.Printf("Sum of Received Messages: %d\n", receiveSummation)
+	fmt.Printf("Messages Sent: %d\n", totalSent)
+	fmt.Printf("Messages Received: %d\n", totalReceived)
+	fmt.Printf("Messages Relayed: %d\n", totalRelayed)
+	fmt.Printf("Sum of Sent Messages: %d\n", totalSendSummation)
+	fmt.Printf("Sum of Received Messages: %d\n", totalReceiveSummation)
 }
 
 // This function sets the registry host port safely
 func setRegistryHostPort(value string) {
-	mutex.Lock()        
-	defer mutex.Unlock() 
+	mutex.Lock()
+	defer mutex.Unlock()
 	registryHostPort = value
 }
 
 // This function gets the registry host port safely
 func getRegistryHostPort() string {
-	mutex.Lock()        
-	defer mutex.Unlock() 
+	mutex.Lock()
+	defer mutex.Unlock()
 	return registryHostPort
 }
 

@@ -293,6 +293,8 @@ func (r *Registry) handleDeregister(conn net.Conn, deregistration *minichord.Der
 	// Remove the node from the registry after passing all validations
 	delete(r.Nodes, nodeID)
 	delete(r.AddrMap, deregistration.Address)
+	delete(r.TrafficSummaries, nodeID)  // Remove the traffic summary for the node
+	delete(r.NodesTaskFinished, nodeID) // Remove the task finished flag for the node
 
 	// Send a positive response to the node indicating successful deregistration
 	SendMiniChordMessage(conn, &minichord.MiniChord{
@@ -339,18 +341,11 @@ func (r *Registry) setupOverlay(nr int) {
 		// Loop through the number of routing entries to populate the routing table
 		for i := 0; i < nr; i++ {
 			hop := int(math.Pow(2, float64(i)))                              // Define a variable hop that represents the distance to the next node, where i is the index of the entry in the table
-			tempIndex := (nodeID + hop) % len(nodeIDs)
-
-			index := nodeIDs[0] // Assign the smallest to be the value
-			routingTable = append(routingTable, r.Nodes[index])
-			// Find the next highest to store into the routing table at that index position
-			for _, nodeSearchID := range nodeIDs {
-				if nodeSearchID >= tempIndex {
-					// Add routing table entry to the nodeSearchID
-					routingTable = routingTable[:len(routingTable)-1]
-					routingTable = append(routingTable, r.Nodes[nodeSearchID]) 
-					break
-				}
+			index := (sort.SearchInts(nodeIDs, nodeID) + hop) % len(nodeIDs) // Find the corresponding node index, wrapping around to the beginning if hop calculation exceeds the number of nodes
+			peerID := nodeIDs[index]                                         // Get the peer node's ID
+			// Check to avoid adding the same node to the routing table
+			if peerID != nodeID {
+				routingTable = append(routingTable, r.Nodes[peerID]) // Add the peer node's info to the routing table
 			}
 		}
 		log.Printf("Node %d routing table: %v", nodeID, routingTable)
@@ -499,7 +494,7 @@ func (r *Registry) HandleNodeRegistryResponse(nodeID int, success bool) {
 
 	// Update the node's setup completion status
 	r.NodesSetupFinished[nodeID] = success
-	r.Mutex.Unlock() // // Unlock as soon as critical section is over to avoid holding lock while printing
+	r.Mutex.Unlock() // Unlock as soon as critical section is over to avoid holding lock while printing
 
 	r.Mutex.RLock() // Read-lock the registry for safe reading
 	allSetupComplete := true
@@ -533,7 +528,13 @@ func (r *Registry) handleTaskFinished(_ net.Conn, taskFinished *minichord.TaskFi
 		log.Printf("[handlesTaskFinished] Lock released after handling task finished message")
 	}()
 	nodeID := int(taskFinished.Id)
-hed[nodeID] = true // Set the task finished flag to true for the specified node
+	r.NodesTaskFinished[nodeID] = true // Set the task finished flag to true for the specified node
+
+	// Print length of nodes task finished
+	log.Printf("[handleTaskFinished] Nodes task finished: %d", len(r.NodesTaskFinished))
+
+	// Print length of nodes
+	log.Printf("[handleTaskFinished] Nodes: %d", len(r.Nodes))
 
 	// Check if all nodes have finished the task
 	if len(r.NodesTaskFinished) == len(r.Nodes) {
