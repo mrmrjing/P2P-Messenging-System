@@ -546,8 +546,6 @@ func (r *Registry) handleTaskFinished(_ net.Conn, taskFinished *minichord.TaskFi
 				log.Printf("Failed to establish a new connection to node %d at %s: %s", nodeInfo.ID, nodeInfo.Addr, err)
 				continue
 			}
-			// Ensure the connection is closed after sending the message
-			defer conn.Close()
 
 			// Construct the message for requesting traffic summaries
 			msg := &minichord.MiniChord{
@@ -562,6 +560,8 @@ func (r *Registry) handleTaskFinished(_ net.Conn, taskFinished *minichord.TaskFi
 			} else {
 				log.Printf("Successfully requested traffic summary for Node ID %d", nodeInfo.ID)
 			}
+			// Close the connection after sending the message
+			conn.Close()
 		}
 	}
 }
@@ -619,6 +619,10 @@ func (r *Registry) printTrafficSummariesCSV() {
 	} else {
 		fmt.Println("Correctness: Not Verified")
 	}
+
+	// After printing the traffic summaries and verifying correctness, clear the traffic summaries map and the nodes task finished map
+	r.TrafficSummaries = make(map[int]*minichord.TrafficSummary)
+	r.NodesTaskFinished = make(map[int]bool)
 }
 
 // This function prints all currently registered nodes' hostnames, port number and node ID
