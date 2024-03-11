@@ -307,59 +307,6 @@ func (r *Registry) handleDeregister(conn net.Conn, deregistration *minichord.Der
 	})
 }
 
-// This function calculates and sets up routing tables for each node based on the overlay network's structure
-func (r *Registry) setupOverlay(nr int) {
-	log.Printf("[setupOverlay] Attempting to setup overlay")
-	r.Mutex.Lock()
-	log.Printf("[setupOverlay] Lock acquired for setting up overlay")
-	defer func() {
-		r.Mutex.Unlock()
-		log.Printf("[setupOverlay] Lock released after setting up overlay")
-	}()
-
-	// Check if there are nodes in the registry
-	if len(r.Nodes) == 0 {
-		fmt.Println("No nodes registered in the registry. Overlay setup aborted.")
-		return
-	}
-
-	// Default to 3 routing entries if not specified, where nr is the number of routing entries (table size)
-	if nr == 0 {
-		nr = 3
-	}
-
-	// Sort node IDs to facilitate table setup, which is to ensure that the routing tables are consistent across all nodes in determining which nodes are neighbors
-	nodeIDs := make([]int, 0, len(r.Nodes))
-	for id := range r.Nodes {
-		nodeIDs = append(nodeIDs, id)
-	}
-	sort.Ints(nodeIDs) // Sort the IDs for consistent ordering
-
-	// Iterate through each node to calculate its routing table, First entry is one hop away, second entry is two hops away, third entry is four hops away, and so on
-	for _, nodeID := range nodeIDs {
-		var routingTable []NodeInfo // Dynamically size the table to allow skipping self-references
-		// Loop through the number of routing entries to populate the routing table
-		for i := 0; i < nr; i++ {
-			hop := int(math.Pow(2, float64(i)))                              // Define a variable hop that represents the distance to the next node, where i is the index of the entry in the table
-			index := (sort.SearchInts(nodeIDs, nodeID) + hop) % len(nodeIDs) // Find the corresponding node index, wrapping around to the beginning if hop calculation exceeds the number of nodes
-			peerID := nodeIDs[index]                                         // Get the peer node's ID
-			// Check to avoid adding the same node to the routing table
-			if peerID != nodeID {
-				routingTable = append(routingTable, r.Nodes[peerID]) // Add the peer node's info to the routing table
-			}
-		}
-		log.Printf("Node %d routing table: %v", nodeID, routingTable)
-
-		// Update the node's routing table in the registry
-		nodeInfo := r.Nodes[nodeID]
-		nodeInfo.RoutingTable = routingTable
-		r.Nodes[nodeID] = nodeInfo // Update the node info in the registry
-
-		// Send the routing table to each node
-		r.sendNodeRegistry(nodeID, routingTable, nodeIDs)
-	}
-}
-
 // This function sends the routing table to the specified node
 func (r *Registry) sendNodeRegistry(nodeID int, routingTable []NodeInfo, allNodeIDs []int) {
 	// Construct the message with the routing table information
@@ -490,24 +437,21 @@ func (r *Registry) StartMessaging(messageCount int) {
 // This function handles the update of the node setup status
 func (r *Registry) HandleNodeRegistryResponse(nodeID int, success bool) {
 	log.Printf("[HandleNodeSetupComplete] Node %d setup complete status: %v", nodeID, success)
-	r.Mutex.Lock() // Lock the registry for writing, to prevent concurrent write operations
+	r.Mutex.Lock()         // Lock the registry for writing, to prevent concurrent write operations
+	defer r.Mutex.Unlock() // Unlock as soon as critical section is over to avoid holding lock while printing
 
 	// Update the node's setup completion status
 	r.NodesSetupFinished[nodeID] = success
-	r.Mutex.Unlock() // Unlock as soon as critical section is over to avoid holding lock while printing
 
-	r.Mutex.RLock() // Read-lock the registry for safe reading
 	allSetupComplete := true
 	// Check if all nodes have finished setup successfully
 	for id := range r.Nodes {
-		setupComplete, exists := r.NodesSetupFinished[id]
-		// If a node is missing from the setup finished map or it's not marked as complete, setup is not complete
-		if !exists || !setupComplete {
+		setupComplete := r.NodesSetupFinished[id]
+		if !setupComplete {
 			allSetupComplete = false
-			break // Exit loop early if any node hasn't finished setup or failed
+			break 
 		}
 	}
-	r.Mutex.RUnlock() // Unlock as soon as critical section is over to avoid holding lock while printing
 
 	// Log the setup status update after releasing the lock
 	log.Printf("[HandleNodeSetupComplete] Node %d setup status updated", nodeID)
@@ -628,10 +572,10 @@ func (r *Registry) printTrafficSummariesCSV() {
 // This function prints all currently registered nodes' hostnames, port number and node ID
 func (r *Registry) ListNodes() {
 	log.Printf("[ListNodes] Attempting to list nodes")
-	r.Mutex.RLock()
+	r.Mutex.Lock()
 	log.Printf("[ListNodes] Lock acquired for listing nodes")
 	defer func() {
-		r.Mutex.RUnlock()
+		r.Mutex.Unlock()
 		log.Printf("[ListNodes] Lock released after listing nodes")
 	}()
 	fmt.Println("Listing all registered nodes:")
@@ -659,16 +603,60 @@ func (r *Registry) SetupOverlay(entries int) {
 
 	// Check if there are nodes in the registry
 	r.Mutex.Lock()
+	defer r.Mutex.Unlock()
 	if len(r.Nodes) == 0 {
 		fmt.Println("No nodes registered in the registry. Overlay setup aborted.")
-		r.Mutex.Unlock()
 		return
 	}
-	r.Mutex.Unlock()
 
 	// If there are nodes, proceed with setting up the overlay
 	r.setupOverlay(entries)
 	fmt.Println("Overlay setup complete.")
+}
+
+// This function calculates and sets up routing tables for each node based on the overlay network's structure
+func (r *Registry) setupOverlay(nr int) {
+	// Check if there are nodes in the registry
+	if len(r.Nodes) == 0 {
+		fmt.Println("No nodes registered in the registry. Overlay setup aborted.")
+		return
+	}
+
+	// Default to 3 routing entries if not specified, where nr is the number of routing entries (table size)
+	if nr == 0 {
+		nr = 3
+	}
+
+	// Sort node IDs to facilitate table setup, which is to ensure that the routing tables are consistent across all nodes in determining which nodes are neighbors
+	nodeIDs := make([]int, 0, len(r.Nodes))
+	for id := range r.Nodes {
+		nodeIDs = append(nodeIDs, id)
+	}
+	sort.Ints(nodeIDs) // Sort the IDs for consistent ordering
+
+	// Iterate through each node to calculate its routing table, First entry is one hop away, second entry is two hops away, third entry is four hops away, and so on
+	for _, nodeID := range nodeIDs {
+		var routingTable []NodeInfo // Dynamically size the table to allow skipping self-references
+		// Loop through the number of routing entries to populate the routing table
+		for i := 0; i < nr; i++ {
+			hop := int(math.Pow(2, float64(i)))                              // Define a variable hop that represents the distance to the next node, where i is the index of the entry in the table
+			index := (sort.SearchInts(nodeIDs, nodeID) + hop) % len(nodeIDs) // Find the corresponding node index, wrapping around to the beginning if hop calculation exceeds the number of nodes
+			peerID := nodeIDs[index]                                         // Get the peer node's ID
+			// Check to avoid adding the same node to the routing table
+			if peerID != nodeID {
+				routingTable = append(routingTable, r.Nodes[peerID]) // Add the peer node's info to the routing table
+			}
+		}
+		log.Printf("Node %d routing table: %v", nodeID, routingTable)
+
+		// Update the node's routing table in the registry
+		nodeInfo := r.Nodes[nodeID]
+		nodeInfo.RoutingTable = routingTable
+		r.Nodes[nodeID] = nodeInfo // Update the node info in the registry
+
+		// Send the routing table to each node
+		r.sendNodeRegistry(nodeID, routingTable, nodeIDs)
+	}
 }
 
 // This function would list the computed routing tables for each node in the overlay
